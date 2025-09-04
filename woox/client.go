@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
 
-	"github.com/plusev-terminal/go-plugin-common/datasrc"
 	dt "github.com/plusev-terminal/go-plugin-common/datasrc/types"
 	rt "github.com/plusev-terminal/go-plugin-common/requester/types"
 )
@@ -17,21 +15,14 @@ type Client struct {
 	name      string
 	baseURL   string
 	requester rt.RequestDoer
-	// WebSocket streaming fields
-	wsConnection *datasrc.WSConnection
-	isStreaming  bool
-	streamMutex  sync.RWMutex
-	stopChan     chan struct{}
 }
 
 // NewClient creates a new WooX API client
 func NewClient(req rt.RequestDoer, baseURL string) *Client {
 	return &Client{
-		name:        "WooX",
-		baseURL:     baseURL,
-		requester:   req,
-		isStreaming: false,
-		stopChan:    make(chan struct{}),
+		name:      "WooX",
+		baseURL:   baseURL,
+		requester: req,
 	}
 }
 
@@ -277,34 +268,18 @@ func (c *Client) GetOHLCV(params dt.OHLCVParams) ([]dt.OHLCVRecord, error) {
 	return records, nil
 }
 
-// StartStream starts streaming live data via WebSocket
-func (c *Client) StartStream(config dt.StreamConfig) error {
-	c.streamMutex.Lock()
-	defer c.streamMutex.Unlock()
-
-	if c.isStreaming {
-		return fmt.Errorf("stream is already active")
-	}
-
+// PrepareStream prepares streaming connection setup
+func (c *Client) PrepareStream(config dt.StreamConfig) (dt.StreamSetup, error) {
 	// Determine WebSocket URL based on environment
 	wsURL := "wss://wss.woox.io/v3/public"
 	if strings.Contains(c.baseURL, "staging") {
 		wsURL = "wss://wss.staging.woox.io/v3/public"
 	}
 
-	// Connect to WooX WebSocket
-	conn, err := datasrc.WSConnect(wsURL, nil, "")
-	if err != nil {
-		return fmt.Errorf("failed to connect to WooX WebSocket: %w", err)
-	}
-
-	c.wsConnection = conn
-	c.isStreaming = true
-
 	// Map interval to timeframe string
 	timeframe := c.mapIntervalToTimeframe(config.Interval)
 
-	// Subscribe to kline data for the specified symbol and timeframe
+	// Create subscription message
 	topic := fmt.Sprintf("kline_%s_%s", config.Symbol, timeframe)
 	subscribeMsg := WSSubscribeMessage{
 		ID:     "sub_1",
@@ -314,18 +289,102 @@ func (c *Client) StartStream(config dt.StreamConfig) error {
 
 	msgBytes, err := json.Marshal(subscribeMsg)
 	if err != nil {
-		return fmt.Errorf("failed to marshal subscribe message: %w", err)
+		return dt.StreamSetup{}, fmt.Errorf("failed to marshal subscribe message: %w", err)
 	}
 
-	err = c.wsConnection.Send(string(msgBytes))
+	return dt.StreamSetup{
+		WebSocketURL:    wsURL,
+		Headers:         nil,
+		Subprotocol:     "",
+		InitialMessages: []string{string(msgBytes)},
+	}, nil
+}
+
+// HandleStreamMessage processes incoming stream messages
+func (c *Client) HandleStreamMessage(message dt.StreamMessage) (dt.StreamResponse, error) {
+	// Try to parse as subscription response first
+	var wsResponse WSResponse
+	if err := json.Unmarshal([]byte(message.Message), &wsResponse); err == nil {
+		if wsResponse.Cmd == "SUBSCRIBE" && wsResponse.Success {
+			// Subscription successful - ignore
+			return dt.StreamResponse{Action: "ignore"}, nil
+		}
+	}
+
+	// Try to parse as kline update
+	var klineUpdate WSKlineUpdate
+	if err := json.Unmarshal([]byte(message.Message), &klineUpdate); err == nil {
+		if strings.HasPrefix(klineUpdate.Topic, "kline_") {
+			// Convert to OHLCV record
+			record, err := c.convertKlineToOHLCV(klineUpdate)
+			if err != nil {
+				return dt.StreamResponse{Action: "ignore"}, nil
+			}
+
+			return dt.StreamResponse{
+				Action:      "ohlcv",
+				OHLCVRecord: &record,
+			}, nil
+		}
+	}
+
+	// Unknown message - ignore
+	return dt.StreamResponse{Action: "ignore"}, nil
+}
+
+// HandleConnectionEvent handles stream connection events
+func (c *Client) HandleConnectionEvent(event dt.ConnectionEvent) (dt.ConnectionResponse, error) {
+	switch event.EventType {
+	case "connected":
+		// Connection established successfully
+		return dt.ConnectionResponse{Action: "ignore"}, nil
+	case "disconnected":
+		// Connection lost - request reconnection
+		return dt.ConnectionResponse{Action: "reconnect"}, nil
+	case "error":
+		// Error occurred - attempt reconnection
+		return dt.ConnectionResponse{Action: "reconnect"}, nil
+	default:
+		return dt.ConnectionResponse{Action: "ignore"}, nil
+	}
+}
+
+// convertKlineToOHLCV converts WooX kline data to OHLCV record
+func (c *Client) convertKlineToOHLCV(update WSKlineUpdate) (dt.OHLCVRecord, error) {
+	// Parse string values to float64
+	open, err := strconv.ParseFloat(update.Data.Open, 64)
 	if err != nil {
-		return fmt.Errorf("failed to send subscribe message: %w", err)
+		return dt.OHLCVRecord{}, fmt.Errorf("failed to parse open price: %w", err)
 	}
 
-	// Start the message processing goroutine
-	go c.processWebSocketMessages(config)
+	high, err := strconv.ParseFloat(update.Data.High, 64)
+	if err != nil {
+		return dt.OHLCVRecord{}, fmt.Errorf("failed to parse high price: %w", err)
+	}
 
-	return nil
+	low, err := strconv.ParseFloat(update.Data.Low, 64)
+	if err != nil {
+		return dt.OHLCVRecord{}, fmt.Errorf("failed to parse low price: %w", err)
+	}
+
+	close, err := strconv.ParseFloat(update.Data.Close, 64)
+	if err != nil {
+		return dt.OHLCVRecord{}, fmt.Errorf("failed to parse close price: %w", err)
+	}
+
+	volume, err := strconv.ParseFloat(update.Data.Volume, 64)
+	if err != nil {
+		return dt.OHLCVRecord{}, fmt.Errorf("failed to parse volume: %w", err)
+	}
+
+	return dt.OHLCVRecord{
+		Timestamp: update.Data.StartTimestamp / 1000, // Convert from milliseconds to seconds
+		Open:      open,
+		High:      high,
+		Low:       low,
+		Close:     close,
+		Volume:    volume,
+	}, nil
 }
 
 // mapIntervalToTimeframe converts interval seconds to WooX timeframe string
@@ -362,116 +421,6 @@ func (c *Client) mapIntervalToTimeframe(interval int64) string {
 	default:
 		return "1h" // Default to 1 hour
 	}
-}
-
-// processWebSocketMessages handles incoming WebSocket messages
-func (c *Client) processWebSocketMessages(config dt.StreamConfig) {
-	for {
-		select {
-		case <-c.stopChan:
-			return
-		default:
-			// Receive message with timeout
-			message, timeout, err := c.wsConnection.Receive(5000) // 5 second timeout
-			if err != nil {
-				continue // Log error and continue
-			}
-			if timeout {
-				continue // No message, continue
-			}
-
-			// Process the message
-			c.handleWebSocketMessage(message, config)
-		}
-	}
-}
-
-// handleWebSocketMessage processes individual WebSocket messages
-func (c *Client) handleWebSocketMessage(message string, config dt.StreamConfig) {
-	// Try to parse as subscription response first
-	var wsResponse WSResponse
-	if err := json.Unmarshal([]byte(message), &wsResponse); err == nil {
-		if wsResponse.Cmd == "SUBSCRIBE" && wsResponse.Success {
-			// Subscription successful
-			return
-		}
-	}
-
-	// Try to parse as kline update
-	var klineUpdate WSKlineUpdate
-	if err := json.Unmarshal([]byte(message), &klineUpdate); err == nil {
-		if strings.HasPrefix(klineUpdate.Topic, "kline_") {
-			c.processKlineUpdate(klineUpdate, config)
-		}
-	}
-}
-
-// processKlineUpdate converts WebSocket kline data to OHLCV format
-func (c *Client) processKlineUpdate(update WSKlineUpdate, config dt.StreamConfig) {
-	// Parse string values to float64
-	open, err := strconv.ParseFloat(update.Data.Open, 64)
-	if err != nil {
-		return
-	}
-
-	high, err := strconv.ParseFloat(update.Data.High, 64)
-	if err != nil {
-		return
-	}
-
-	low, err := strconv.ParseFloat(update.Data.Low, 64)
-	if err != nil {
-		return
-	}
-
-	close, err := strconv.ParseFloat(update.Data.Close, 64)
-	if err != nil {
-		return
-	}
-
-	volume, err := strconv.ParseFloat(update.Data.Volume, 64)
-	if err != nil {
-		return
-	}
-
-	// Create OHLCV record
-	record := dt.OHLCVRecord{
-		Timestamp: update.Data.StartTimestamp / 1000, // Convert from milliseconds to seconds
-		Open:      open,
-		High:      high,
-		Low:       low,
-		Close:     close,
-		Volume:    volume,
-	}
-
-	// For now, we'll store the streaming data internally
-	// In a full implementation, you would send this to a callback or channel
-	_ = record // Use the record (placeholder for actual streaming logic)
-}
-
-// StopStream stops the WebSocket streaming
-func (c *Client) StopStream() error {
-	c.streamMutex.Lock()
-	defer c.streamMutex.Unlock()
-
-	if !c.isStreaming {
-		return nil // Already stopped
-	}
-
-	// Signal stop to the processing goroutine
-	close(c.stopChan)
-	c.stopChan = make(chan struct{}) // Reset for next use
-
-	// Close WebSocket connection
-	if c.wsConnection != nil {
-		err := c.wsConnection.Close()
-		c.wsConnection = nil
-		c.isStreaming = false
-		return err
-	}
-
-	c.isStreaming = false
-	return nil
 }
 
 // SupportsStreaming returns true as WebSocket streaming is now implemented

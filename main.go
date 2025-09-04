@@ -36,19 +36,24 @@ func (w *WooXExchange) GetOHLCV(params dt.OHLCVParams) ([]dt.OHLCVRecord, error)
 	return w.client.GetOHLCV(params)
 }
 
-// StartStream starts streaming live data (not implemented yet)
-func (w *WooXExchange) StartStream(config dt.StreamConfig) error {
-	return w.client.StartStream(config)
+// PrepareStream prepares streaming connection setup
+func (w *WooXExchange) PrepareStream(config dt.StreamConfig) (dt.StreamSetup, error) {
+	return w.client.PrepareStream(config)
+}
+
+// HandleStreamMessage processes incoming stream messages
+func (w *WooXExchange) HandleStreamMessage(message dt.StreamMessage) (dt.StreamResponse, error) {
+	return w.client.HandleStreamMessage(message)
+}
+
+// HandleConnectionEvent handles stream connection events
+func (w *WooXExchange) HandleConnectionEvent(event dt.ConnectionEvent) (dt.ConnectionResponse, error) {
+	return w.client.HandleConnectionEvent(event)
 }
 
 // SupportsStreaming returns true as WebSocket streaming is now implemented
 func (w *WooXExchange) SupportsStreaming() bool {
 	return w.client.SupportsStreaming()
-}
-
-// StopStream stops the WebSocket streaming
-func (w *WooXExchange) StopStream() error {
-	return w.client.StopStream()
 }
 
 // Plugin configuration
@@ -109,7 +114,17 @@ func getOHLCV() int32 {
 	return handler.ExportGetOHLCV()
 }
 
-//go:wasmexport stream_ohlcv
-func streamOHLCV() int32 {
-	return handler.ExportStreamOHLCV()
+//go:wasmexport prepare_stream
+func prepareStream() int32 {
+	return handler.ExportPrepareStream()
+}
+
+//go:wasmexport handle_stream_message
+func handleStreamMessage() int32 {
+	return handler.ExportHandleStreamMessage()
+}
+
+//go:wasmexport stream_connection_event
+func streamConnectionEvent() int32 {
+	return handler.ExportStreamConnectionEvent()
 }
