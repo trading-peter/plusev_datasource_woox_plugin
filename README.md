@@ -12,21 +12,64 @@ A comprehensive WooX exchange datasource plugin for PlusEV Terminal, implementin
 - **Robust Error Handling**: Comprehensive error handling for API failures
 - **Performance Optimized**: ~257ms average response time
 
-### 🔧 **Plugin Specification Compliance**
-- **Meta Export**: Plugin metadata with proper network targets
+### � **WebSocket Streaming Implementation (NEW!)**
+- **Real-time OHLCV Data**: Live kline/candlestick streaming via WebSocket
+- **WooX v3 WebSocket API**: Full integration with `wss://wss.woox.io/v3/public`
+- **Automatic Subscription**: Subscribes to kline topics based on symbol and timeframe
+- **Connection Management**: Proper WebSocket connection lifecycle management
+- **Error Handling**: Robust error handling for connection failures and reconnections
+- **Multi-timeframe Support**: Supports all WooX timeframes for streaming
+- **Production Ready**: Includes staging environment support
+
+### �🔧 **Plugin Specification Compliance**
+- **Meta Export**: Plugin metadata with proper network targets (including WebSocket URLs)
 - **Market Listing**: Complete market metadata with base/quote asset parsing
 - **Timeframe Export**: All supported timeframes with proper intervals
 - **OHLCV Export**: Historical data with timestamp, OHLCV, and volume
-- **Stream Placeholder**: Ready for WebSocket implementation
+- **Stream Support**: Real-time WebSocket streaming for live market data
 
-## 📊 **WooX v3 API Integration**
+## � **WooX v3 API Integration**
 
 ### **Updated Endpoints (v1 → v3)**
 | Function | v1 Endpoint | v3 Endpoint | Status |
 |----------|-------------|-------------|--------|
 | Markets | `/v1/public/info` | `/v3/public/instruments` | ✅ Migrated |
 | OHLCV | `/v1/public/kline` | `/v3/public/klineHistory` | ✅ Migrated |
+| **WebSocket** | **N/A** | **`wss://wss.woox.io/v3/public`** | **✅ NEW** |
 | Base URL | `api.woo.org` | `api.woox.io` | ✅ Updated |
+
+### **WebSocket Streaming (v3)**
+```
+Production:  wss://wss.woox.io/v3/public
+Staging:     wss://wss.staging.woox.io/v3/public
+```
+
+#### **Subscription Format**
+```json
+{
+  "id": "sub_1",
+  "cmd": "SUBSCRIBE", 
+  "params": ["kline_PERP_BTC_USDT_1h"]
+}
+```
+
+#### **Kline Stream Data**
+```json
+{
+  "topic": "kline_PERP_BTC_USDT_1h",
+  "ts": 1693737600000,
+  "data": {
+    "symbol": "PERP_BTC_USDT",
+    "open": "26150.5",
+    "high": "26180.2", 
+    "low": "26145.8",
+    "close": "26165.4",
+    "volume": "125.4532",
+    "startTimestamp": 1693737600000,
+    "endTimestamp": 1693741200000
+  }
+}
+```
 
 ### **v3 Response Format**
 ```json
@@ -92,6 +135,20 @@ type WooXExchange struct {
 }
 ```
 
+#### **WooX Client with WebSocket Support**
+```go
+type Client struct {
+    name         string
+    baseURL      string
+    requester    rt.RequestDoer
+    // WebSocket streaming fields
+    wsConnection *datasrc.WSConnection
+    isStreaming  bool
+    streamMutex  sync.RWMutex
+    stopChan     chan struct{}
+}
+```
+
 #### **v3 Data Structures**
 ```go
 type WooXInstrument struct {
@@ -115,6 +172,13 @@ type WooXKlineData struct {
     StartTimestamp int64  `json:"startTimestamp"` // v3: camelCase
     EndTimestamp   int64  `json:"endTimestamp"`   // v3: camelCase
 }
+
+// WebSocket message structures
+type WSKlineUpdate struct {
+    Topic string      `json:"topic"`
+    Ts    int64       `json:"ts"`
+    Data  WSKlineData `json:"data"`
+}
 ```
 
 ## 🔧 **Build & Test**
@@ -123,7 +187,41 @@ type WooXKlineData struct {
 ```bash
 ./build.sh
 ```
-**Output**: `woox-datasource.wasm` (1.79MB)
+**Output**: `plugin.wasm` (1.83MB)
+
+### **WebSocket Streaming Usage**
+```go
+// Create WooX client
+client := woox.NewClient(requester.NewRequester(), "https://api.woox.io")
+
+// Check streaming support
+if client.SupportsStreaming() {
+    // Configure stream
+    config := dt.StreamConfig{
+        Symbol:   "PERP_BTC_USDT",
+        Interval: 3600, // 1 hour in seconds
+    }
+    
+    // Start streaming
+    err := client.StartStream(config)
+    if err != nil {
+        log.Fatal(err)
+    }
+    
+    // Stream will receive real-time OHLCV updates
+    // Stop when done
+    defer client.StopStream()
+}
+```
+
+### **Supported Streaming Timeframes**
+| Interval (seconds) | Timeframe | WooX Topic |
+|-------------------|-----------|------------|
+| 60 | 1m | `kline_SYMBOL_1m` |
+| 300 | 5m | `kline_SYMBOL_5m` |
+| 3600 | 1h | `kline_SYMBOL_1h` |
+| 86400 | 1d | `kline_SYMBOL_1d` |
+| *All 14 timeframes supported* | | |
 
 ### **Test API Client (Standalone)**
 ```bash

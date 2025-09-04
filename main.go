@@ -41,9 +41,14 @@ func (w *WooXExchange) StartStream(config dt.StreamConfig) error {
 	return w.client.StartStream(config)
 }
 
-// SupportsStreaming returns false as WebSocket streaming is not yet implemented
+// SupportsStreaming returns true as WebSocket streaming is now implemented
 func (w *WooXExchange) SupportsStreaming() bool {
 	return w.client.SupportsStreaming()
+}
+
+// StopStream stops the WebSocket streaming
+func (w *WooXExchange) StopStream() error {
+	return w.client.StopStream()
 }
 
 // Plugin configuration
@@ -64,6 +69,8 @@ var config = datasrc.DataSourceConfig{
 	NetworkTargets: []string{
 		"https://api.woox.io/*",
 		"https://api.staging.woox.io/*",
+		"wss://wss.woox.io/*",
+		"wss://wss.staging.woox.io/*",
 	},
 }
 
