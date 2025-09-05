@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/plusev-terminal/go-plugin-common/logging"
+
 	dt "github.com/plusev-terminal/go-plugin-common/datasrc/types"
 	rt "github.com/plusev-terminal/go-plugin-common/requester/types"
 )
@@ -15,6 +17,7 @@ type Client struct {
 	name      string
 	baseURL   string
 	requester rt.RequestDoer
+	log       *logging.Logger
 }
 
 // NewClient creates a new WooX API client
@@ -23,6 +26,7 @@ func NewClient(req rt.RequestDoer, baseURL string) *Client {
 		name:      "WooX",
 		baseURL:   baseURL,
 		requester: req,
+		log:       logging.NewLogger("WooX"),
 	}
 }
 
@@ -104,21 +108,29 @@ type WSKlineUpdate struct {
 }
 
 type WSKlineData struct {
-	Symbol         string `json:"symbol"`
-	Open           string `json:"open"`
-	High           string `json:"high"`
-	Low            string `json:"low"`
-	Close          string `json:"close"`
-	Volume         string `json:"volume"`
-	Amount         string `json:"amount"`
-	Type           string `json:"type"`
-	StartTimestamp int64  `json:"startTimestamp"`
-	EndTimestamp   int64  `json:"endTimestamp"`
+	Symbol         string `json:"s"`   // symbol
+	Type           string `json:"t"`   // kline type
+	Open           string `json:"o"`   // open
+	Close          string `json:"c"`   // close
+	High           string `json:"h"`   // high
+	Low            string `json:"l"`   // low
+	Volume         string `json:"v"`   // volume in base token
+	Amount         string `json:"a"`   // amount in USDT
+	StartTimestamp int64  `json:"st"`  // kline start timestamp
+	EndTimestamp   int64  `json:"et"`  // kline end timestamp
+	Timestamp      int64  `json:"ts"`  // kline generation time
+	TradeTimestamp int64  `json:"tts"` // last trade time
 }
 
 // GetName returns the name of the data source
 func (c *Client) GetName() string {
 	return c.name
+}
+
+func (c *Client) GetCredentialFields() ([]dt.CredentialField, error) {
+	return []dt.CredentialField{
+		{},
+	}, nil
 }
 
 // GetMarkets returns all available trading markets from WooX
@@ -269,18 +281,32 @@ func (c *Client) GetOHLCV(params dt.OHLCVParams) ([]dt.OHLCVRecord, error) {
 }
 
 // PrepareStream prepares streaming connection setup
-func (c *Client) PrepareStream(config dt.StreamConfig) (dt.StreamSetup, error) {
+func (c *Client) PrepareStream(request dt.StreamSetupRequest) (dt.StreamSetupResponse, error) {
+	// Extract parameters
+	symbol, _ := request.Parameters["symbol"].(string)
+	interval, _ := request.Parameters["interval"].(string)
+
+	if symbol == "" {
+		return dt.StreamSetupResponse{
+			Success: false,
+			Error:   "symbol parameter is required",
+		}, nil
+	}
+
 	// Determine WebSocket URL based on environment
 	wsURL := "wss://wss.woox.io/v3/public"
 	if strings.Contains(c.baseURL, "staging") {
 		wsURL = "wss://wss.staging.woox.io/v3/public"
 	}
 
-	// Map interval to timeframe string
-	timeframe := c.mapIntervalToTimeframe(config.Interval)
+	// Convert interval (timeframe) to WooX kline format
+	timeframe := "1m" // default
+	if interval != "" {
+		timeframe = interval
+	}
 
 	// Create subscription message
-	topic := fmt.Sprintf("kline_%s_%s", config.Symbol, timeframe)
+	topic := fmt.Sprintf("kline@%s@%s", symbol, timeframe)
 	subscribeMsg := WSSubscribeMessage{
 		ID:     "sub_1",
 		Cmd:    "SUBSCRIBE",
@@ -289,10 +315,18 @@ func (c *Client) PrepareStream(config dt.StreamConfig) (dt.StreamSetup, error) {
 
 	msgBytes, err := json.Marshal(subscribeMsg)
 	if err != nil {
-		return dt.StreamSetup{}, fmt.Errorf("failed to marshal subscribe message: %w", err)
+		return dt.StreamSetupResponse{
+			Success: false,
+			Error:   fmt.Sprintf("failed to marshal subscribe message: %v", err),
+		}, nil
 	}
 
-	return dt.StreamSetup{
+	c.log.InfoWithData(fmt.Sprintf("Preparing stream for %s", symbol), map[string]any{
+		"websocket_url": wsURL,
+	})
+
+	return dt.StreamSetupResponse{
+		Success:         true,
 		WebSocketURL:    wsURL,
 		Headers:         nil,
 		Subprotocol:     "",
@@ -301,51 +335,78 @@ func (c *Client) PrepareStream(config dt.StreamConfig) (dt.StreamSetup, error) {
 }
 
 // HandleStreamMessage processes incoming stream messages
-func (c *Client) HandleStreamMessage(message dt.StreamMessage) (dt.StreamResponse, error) {
+func (c *Client) HandleStreamMessage(request dt.StreamMessageRequest) (dt.StreamMessageResponse, error) {
+	c.log.InfoWithData(fmt.Sprintf("Processing message for stream %s", request.StreamID), map[string]any{
+		"message": request.Message,
+	})
+
 	// Try to parse as subscription response first
 	var wsResponse WSResponse
-	if err := json.Unmarshal([]byte(message.Message), &wsResponse); err == nil {
+	if err := json.Unmarshal([]byte(request.Message), &wsResponse); err == nil {
 		if wsResponse.Cmd == "SUBSCRIBE" && wsResponse.Success {
 			// Subscription successful - ignore
-			return dt.StreamResponse{Action: "ignore"}, nil
+			return dt.StreamMessageResponse{
+				Success: true,
+				Action:  "ignore",
+			}, nil
 		}
 	}
 
 	// Try to parse as kline update
 	var klineUpdate WSKlineUpdate
-	if err := json.Unmarshal([]byte(message.Message), &klineUpdate); err == nil {
-		if strings.HasPrefix(klineUpdate.Topic, "kline_") {
+	if err := json.Unmarshal([]byte(request.Message), &klineUpdate); err == nil {
+		if strings.HasPrefix(klineUpdate.Topic, "kline@") {
 			// Convert to OHLCV record
 			record, err := c.convertKlineToOHLCV(klineUpdate)
 			if err != nil {
-				return dt.StreamResponse{Action: "ignore"}, nil
+				return dt.StreamMessageResponse{
+					Success: true,
+					Action:  "ignore",
+				}, nil
 			}
 
-			return dt.StreamResponse{
-				Action:      "ohlcv",
-				OHLCVRecord: &record,
+			return dt.StreamMessageResponse{
+				Success:  true,
+				Action:   "data",
+				DataType: "ohlcv",
+				Data:     record,
 			}, nil
 		}
 	}
 
 	// Unknown message - ignore
-	return dt.StreamResponse{Action: "ignore"}, nil
+	return dt.StreamMessageResponse{
+		Success: true,
+		Action:  "ignore",
+	}, nil
 }
 
 // HandleConnectionEvent handles stream connection events
-func (c *Client) HandleConnectionEvent(event dt.ConnectionEvent) (dt.ConnectionResponse, error) {
+func (c *Client) HandleConnectionEvent(event dt.StreamConnectionEvent) (dt.StreamConnectionResponse, error) {
 	switch event.EventType {
 	case "connected":
 		// Connection established successfully
-		return dt.ConnectionResponse{Action: "ignore"}, nil
+		return dt.StreamConnectionResponse{
+			Success: true,
+			Action:  "ignore",
+		}, nil
 	case "disconnected":
 		// Connection lost - request reconnection
-		return dt.ConnectionResponse{Action: "reconnect"}, nil
+		return dt.StreamConnectionResponse{
+			Success: true,
+			Action:  "reconnect",
+		}, nil
 	case "error":
 		// Error occurred - attempt reconnection
-		return dt.ConnectionResponse{Action: "reconnect"}, nil
+		return dt.StreamConnectionResponse{
+			Success: true,
+			Action:  "reconnect",
+		}, nil
 	default:
-		return dt.ConnectionResponse{Action: "ignore"}, nil
+		return dt.StreamConnectionResponse{
+			Success: true,
+			Action:  "ignore",
+		}, nil
 	}
 }
 

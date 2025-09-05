@@ -21,6 +21,11 @@ func (w *WooXExchange) GetName() string {
 	return w.client.GetName()
 }
 
+func (w *WooXExchange) GetCredentialFields() ([]dt.CredentialField, error) {
+	// WooX does not require credentials for public data access
+	return w.client.GetCredentialFields()
+}
+
 // GetMarkets returns all available trading markets from WooX
 func (w *WooXExchange) GetMarkets() ([]dt.MarketMeta, error) {
 	return w.client.GetMarkets()
@@ -37,17 +42,17 @@ func (w *WooXExchange) GetOHLCV(params dt.OHLCVParams) ([]dt.OHLCVRecord, error)
 }
 
 // PrepareStream prepares streaming connection setup
-func (w *WooXExchange) PrepareStream(config dt.StreamConfig) (dt.StreamSetup, error) {
-	return w.client.PrepareStream(config)
+func (w *WooXExchange) PrepareStream(request dt.StreamSetupRequest) (dt.StreamSetupResponse, error) {
+	return w.client.PrepareStream(request)
 }
 
 // HandleStreamMessage processes incoming stream messages
-func (w *WooXExchange) HandleStreamMessage(message dt.StreamMessage) (dt.StreamResponse, error) {
-	return w.client.HandleStreamMessage(message)
+func (w *WooXExchange) HandleStreamMessage(request dt.StreamMessageRequest) (dt.StreamMessageResponse, error) {
+	return w.client.HandleStreamMessage(request)
 }
 
 // HandleConnectionEvent handles stream connection events
-func (w *WooXExchange) HandleConnectionEvent(event dt.ConnectionEvent) (dt.ConnectionResponse, error) {
+func (w *WooXExchange) HandleConnectionEvent(event dt.StreamConnectionEvent) (dt.StreamConnectionResponse, error) {
 	return w.client.HandleConnectionEvent(event)
 }
 
@@ -97,6 +102,11 @@ func meta() int32 {
 //go:wasmexport get_name
 func getName() int32 {
 	return handler.ExportGetName()
+}
+
+//go:wasmexport
+func getCredentialFields() int32 {
+	return handler.ExportGetCredentialFields()
 }
 
 //go:wasmexport list_markets
