@@ -104,7 +104,7 @@ func getName() int32 {
 	return handler.ExportGetName()
 }
 
-//go:wasmexport
+//go:wasmexport get_credential_fields
 func getCredentialFields() int32 {
 	return handler.ExportGetCredentialFields()
 }
