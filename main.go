@@ -22,8 +22,12 @@ func (w *WooXExchange) GetName() string {
 }
 
 func (w *WooXExchange) GetCredentialFields() ([]dt.CredentialField, error) {
-	// WooX does not require credentials for public data access
 	return w.client.GetCredentialFields()
+}
+
+func (w *WooXExchange) SetCredentials(creds map[string]string) error {
+	w.client.SetCredentials(creds)
+	return nil
 }
 
 // GetMarkets returns all available trading markets from WooX
@@ -107,6 +111,11 @@ func getName() int32 {
 //go:wasmexport get_credential_fields
 func getCredentialFields() int32 {
 	return handler.ExportGetCredentialFields()
+}
+
+//go:wasmexport set_credentials
+func setCredentials() int32 {
+	return handler.ExportSetCredentials()
 }
 
 //go:wasmexport list_markets

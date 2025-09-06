@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/extism/go-pdk"
 	"github.com/plusev-terminal/go-plugin-common/logging"
 
 	dt "github.com/plusev-terminal/go-plugin-common/datasrc/types"
@@ -22,8 +23,6 @@ type Client struct {
 	baseURL   string
 	requester rt.RequestDoer
 	log       *logging.Logger
-	apiKey    string
-	apiSecret string
 }
 
 // NewClient creates a new WooX API client
@@ -227,8 +226,8 @@ type OrderResponse struct {
 }
 
 func (c *Client) SetCredentials(creds map[string]string) {
-	c.apiKey = creds["apiKey"]
-	c.apiSecret = creds["apiSecret"]
+	pdk.SetVar("apiKey", []byte(creds["apiKey"]))
+	pdk.SetVar("apiSecret", []byte(creds["apiSecret"]))
 }
 
 // GetName returns the name of the data source
@@ -655,14 +654,19 @@ func (c *Client) generateWooXSignature(timestamp string, method, path, body stri
 	// Create the string to sign: timestamp + method + path + body
 	message := timestamp + method + path + body
 
-	h := hmac.New(sha256.New, []byte(c.apiSecret))
+	apiSecret := pdk.GetVar("apiSecret")
+
+	h := hmac.New(sha256.New, apiSecret)
 	h.Write([]byte(message))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
 // addAuthHeaders adds WooX authentication headers to a request
 func (c *Client) addAuthHeaders(req *rt.Request, body string) {
-	if c.apiKey == "" || c.apiSecret == "" {
+	apiKey := pdk.GetVar("apiKey")
+	apiSecret := pdk.GetVar("apiSecret")
+
+	if apiKey == nil || apiSecret == nil {
 		return // No authentication configured
 	}
 
@@ -680,7 +684,7 @@ func (c *Client) addAuthHeaders(req *rt.Request, body string) {
 		req.Headers = make(map[string]string)
 	}
 
-	req.Headers["x-api-key"] = c.apiKey
+	req.Headers["x-api-key"] = string(apiKey)
 	req.Headers["x-api-timestamp"] = timestamp
 	req.Headers["x-api-signature"] = signature
 	req.Headers["Content-Type"] = "application/json"
@@ -688,7 +692,10 @@ func (c *Client) addAuthHeaders(req *rt.Request, body string) {
 
 // isAuthenticated returns true if the client has authentication credentials
 func (c *Client) isAuthenticated() bool {
-	return c.apiKey != "" && c.apiSecret != ""
+	apiKey := pdk.GetVar("apiKey")
+	apiSecret := pdk.GetVar("apiSecret")
+
+	return apiKey != nil && apiSecret != nil
 }
 
 // generateListenKey generates a listen key for private WebSocket connections
