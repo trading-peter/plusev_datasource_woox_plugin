@@ -238,16 +238,16 @@ func (c *Client) GetName() string {
 func (c *Client) GetCredentialFields() ([]dt.CredentialField, error) {
 	return []dt.CredentialField{
 		{
-			Name:      "api_key",
-			Encrypt:   false,
-			Mask:      true,
-			OmitEmpty: true,
+			Label:   "API Key",
+			Name:    "api_key",
+			Encrypt: false,
+			Mask:    true,
 		},
 		{
-			Name:      "api_secret",
-			Encrypt:   true,
-			Mask:      true,
-			OmitEmpty: true,
+			Label:   "API Secret",
+			Name:    "api_secret",
+			Encrypt: true,
+			Mask:    true,
 		},
 	}, nil
 }

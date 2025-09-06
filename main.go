@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/extism/go-pdk"
 	"github.com/plusev-terminal/go-plugin-common/datasrc"
 	dt "github.com/plusev-terminal/go-plugin-common/datasrc/types"
 	m "github.com/plusev-terminal/go-plugin-common/meta"
@@ -65,42 +66,44 @@ func (w *WooXExchange) SupportsStreaming() bool {
 	return w.client.SupportsStreaming()
 }
 
-// Plugin configuration
-var config = datasrc.DataSourceConfig{
-	PluginID:    "woox-datasource",
-	Name:        "WooX Exchange Data Source",
-	Description: "Provides market data from WooX exchange via REST API",
-	Author:      "PlusEV Team",
-	Version:     "1.0.0",
-	Repository:  "https://github.com/trading-peter/plusev_datasource_woox_plugin",
-	Tags:        []string{"woox", "crypto", "exchange", "spot", "futures"},
-	Contacts: []m.AuthorContact{
-		{
-			Kind:  "email",
-			Value: "dev@plusev.com",
-		},
-	},
-	NetworkTargets: []string{
-		"https://api.woox.io/*",
-		"https://api.staging.woox.io/*",
-		"wss://wss.woox.io/*",
-		"wss://wss.staging.woox.io/*",
-	},
-}
-
 // Create data source instance using production requester
 var dataSource = &WooXExchange{
 	client: woox.NewClient(requester.NewRequester(), "https://api.woox.io"),
 }
 
 // Create plugin handler
-var handler = datasrc.NewPluginHandler(config, dataSource)
+var handler = datasrc.NewPluginHandler(dataSource)
 
 // Export functions
 //
 //go:wasmexport meta
 func meta() int32 {
-	return handler.ExportMeta()
+	pdk.OutputJSON(m.Meta{
+		PluginID:    "woox-datasource",
+		Name:        "WooX Exchange",
+		AppID:       "datasrc",
+		Category:    "CexDataSource",
+		Description: "Allows the PlusEV terminal to interact with the REST and Websocket API of WooX.",
+		Author:      "PlusEV Team",
+		Version:     "1.0.0",
+		Repository:  "https://github.com/trading-peter/plusev_datasource_woox_plugin",
+		Tags:        []string{"woox", "crypto", "exchange", "spot", "futures"},
+		Contacts: []m.AuthorContact{
+			{
+				Kind:  "x.com",
+				Value: "https://x.com/trading_peter",
+			},
+		},
+		Resources: m.ResourceAccess{
+			AllowedNetworkTargets: []m.NetworkTargetRule{
+				{Pattern: "https://api.woox.io/*"},
+				{Pattern: "https://api.staging.woox.io/*"},
+				{Pattern: "wss://wss.woox.io/*"},
+				{Pattern: "wss://wss.staging.woox.io/*"},
+			},
+		},
+	})
+	return 0
 }
 
 //go:wasmexport get_name
