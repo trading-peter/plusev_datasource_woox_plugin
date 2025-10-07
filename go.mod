@@ -1,6 +1,6 @@
 module github.com/trading-peter/plusev_datasource_woox_plugin
 
-go 1.24.2
+go 1.25.1
 
 require github.com/plusev-terminal/go-plugin-common v0.0.0
 

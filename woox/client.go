@@ -238,16 +238,26 @@ func (c *Client) GetName() string {
 func (c *Client) GetCredentialFields() ([]dt.CredentialField, error) {
 	return []dt.CredentialField{
 		{
-			Label:   "API Key",
-			Name:    "api_key",
-			Encrypt: false,
-			Mask:    true,
+			Label:    "Application ID",
+			Name:     "app_id",
+			Required: true,
+			Encrypt:  true,
+			Mask:     true,
 		},
 		{
-			Label:   "API Secret",
-			Name:    "api_secret",
-			Encrypt: true,
-			Mask:    true,
+			Label:       "API Key",
+			Name:        "api_key",
+			Description: "Generate here: https://woox.io/en/account/sub-account",
+			Required:    true,
+			Encrypt:     true,
+			Mask:        true,
+		},
+		{
+			Label:    "API Secret",
+			Name:     "api_secret",
+			Required: true,
+			Encrypt:  true,
+			Mask:     true,
 		},
 	}, nil
 }
