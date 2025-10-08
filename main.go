@@ -238,19 +238,26 @@ func startOHLCVStream(key StreamKey) int32 {
 		return errorResponse(fmt.Sprintf("unsupported interval: %s", interval))
 	}
 
-	// Connect to WebSocket
-	wsURL := "wss://wss.woox.io/v3/public"
+	// Connect to WebSocket with applicationID from credentials
+	// Get applicationID from plugin vars (set via plugin_configure)
+	appIDBytes := pdk.GetVar("applicationID")
+	applicationID := "public" // Default fallback
+	if len(appIDBytes) > 0 {
+		applicationID = string(appIDBytes)
+	}
+
+	wsURL := fmt.Sprintf("wss://wss.woox.io/ws/stream/%s", applicationID)
 	connID, err := wsConnect(wsURL, nil)
 	if err != nil {
 		return errorResponse(fmt.Sprintf("failed to connect: %v", err))
 	}
 
 	// Subscribe to kline stream
-	channel := fmt.Sprintf("kline_%s_%s", symbol, wooxInterval)
+	channel := fmt.Sprintf("%s@kline_%s", symbol, wooxInterval)
 	subscribeMsg := map[string]interface{}{
-		"id":     "sub_" + channel,
-		"cmd":    "SUBSCRIBE",
-		"params": []string{channel},
+		"id":    "kline_" + symbol + "_" + wooxInterval,
+		"topic": channel,
+		"event": "subscribe",
 	}
 
 	if err := wsSend(connID, subscribeMsg); err != nil {
@@ -336,23 +343,26 @@ func receiveOHLCVMessages(ctx context.Context, connID string, key StreamKey, sym
 				log.Info(fmt.Sprintf("Message topic: %s", wsMsg.Topic))
 			}
 
-			// Check if it's a kline message
-			if !strings.HasPrefix(wsMsg.Topic, "kline_") {
+			// Check if it's a kline message (format: {symbol}@kline_{interval})
+			if !strings.Contains(wsMsg.Topic, "@kline_") {
 				log.Info(fmt.Sprintf("Skipping non-kline message: %s", wsMsg.Topic))
 				continue // Not a kline message
 			}
 
 			log.Info(fmt.Sprintf("Processing kline message: %s", wsMsg.Topic))
 
-			// Parse kline data
+			// Parse kline data - WooX uses "startTime" not "startTimestamp" per docs
 			var kline struct {
-				Symbol         string `json:"symbol"`
-				Open           string `json:"open"`
-				Close          string `json:"close"`
-				High           string `json:"high"`
-				Low            string `json:"low"`
-				Volume         string `json:"volume"`
-				StartTimestamp int64  `json:"startTimestamp"`
+				Symbol    string  `json:"symbol"`
+				Type      string  `json:"type"`
+				Open      float64 `json:"open"`
+				Close     float64 `json:"close"`
+				High      float64 `json:"high"`
+				Low       float64 `json:"low"`
+				Volume    float64 `json:"volume"`
+				Amount    float64 `json:"amount"`
+				StartTime int64   `json:"startTime"`
+				EndTime   int64   `json:"endTime"`
 			}
 			if err := json.Unmarshal(wsMsg.Data, &kline); err != nil {
 				log.Debug(fmt.Sprintf("Failed to parse kline data: %v", err))
@@ -363,12 +373,12 @@ func receiveOHLCVMessages(ctx context.Context, connID string, key StreamKey, sym
 			ohlcv := OHLCVData{
 				Symbol:    symbol,
 				Interval:  interval,
-				Timestamp: time.UnixMilli(kline.StartTimestamp),
-				Open:      parseFloat(kline.Open),
-				High:      parseFloat(kline.High),
-				Low:       parseFloat(kline.Low),
-				Close:     parseFloat(kline.Close),
-				Volume:    parseFloat(kline.Volume),
+				Timestamp: time.UnixMilli(kline.StartTime),
+				Open:      kline.Open,
+				High:      kline.High,
+				Low:       kline.Low,
+				Close:     kline.Close,
+				Volume:    kline.Volume,
 			}
 
 			// Publish to actor system
@@ -620,7 +630,89 @@ func get_ohlcv() int32 {
 
 	pdk.OutputJSON(records)
 	return 0
-} // ============================================================================
+}
+
+//go:wasmexport prepare_stream
+func prepare_stream() int32 {
+	input := pdk.Input()
+
+	var request dt.StreamSetupRequest
+	if err := json.Unmarshal(input, &request); err != nil {
+		return errorResponse(fmt.Sprintf("invalid request: %v", err))
+	}
+
+	response, err := wooxClient.PrepareStream(request)
+	if err != nil {
+		return errorResponse(fmt.Sprintf("failed to prepare stream: %v", err))
+	}
+
+	pdk.OutputJSON(response)
+	if response.Success {
+		return 0
+	}
+	return 1
+}
+
+//go:wasmexport handle_stream_message
+func handle_stream_message() int32 {
+	input := pdk.Input()
+
+	var request dt.StreamMessageRequest
+	if err := json.Unmarshal(input, &request); err != nil {
+		return errorResponse(fmt.Sprintf("invalid request: %v", err))
+	}
+
+	response, err := wooxClient.HandleStreamMessage(request)
+	if err != nil {
+		return errorResponse(fmt.Sprintf("failed to handle message: %v", err))
+	}
+
+	// If action is "data", publish it via the stream system
+	if response.Action == "data" {
+		// Extract stream parameters from request to build stream key
+		// The terminal should have sent these with the message
+		streamKey := StreamKey{
+			Type:       response.DataType,
+			Source:     "woox-datasource-generic",
+			Identifier: request.StreamID, // Temporary - should come from params
+			Parameters: make(map[string]string),
+		}
+
+		// Publish the data
+		if err := publishStreamData(streamKey, response.Data); err != nil {
+			logging.NewLogger("woox-datasource").Warn(fmt.Sprintf("Failed to publish stream data: %v", err))
+		}
+	}
+
+	pdk.OutputJSON(response)
+	if response.Success {
+		return 0
+	}
+	return 1
+}
+
+//go:wasmexport stream_connection_event
+func stream_connection_event() int32 {
+	input := pdk.Input()
+
+	var event dt.StreamConnectionEvent
+	if err := json.Unmarshal(input, &event); err != nil {
+		return errorResponse(fmt.Sprintf("invalid event: %v", err))
+	}
+
+	response, err := wooxClient.HandleConnectionEvent(event)
+	if err != nil {
+		return errorResponse(fmt.Sprintf("failed to handle event: %v", err))
+	}
+
+	pdk.OutputJSON(response)
+	if response.Success {
+		return 0
+	}
+	return 1
+}
+
+// ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
 

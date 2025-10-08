@@ -92,18 +92,26 @@ type KlineResponse struct {
 }
 
 // WooX WebSocket message structures
+// WebSocket API V2 subscription message structure
 type WSSubscribeMessage struct {
+	ID    string `json:"id"`
+	Event string `json:"event"` // "subscribe" or "unsubscribe"
+	Topic string `json:"topic"` // Format: {symbol}@kline_{time}
+}
+
+// Legacy V3 subscription (deprecated)
+type WSSubscribeMessageV3 struct {
 	ID     string   `json:"id"`
 	Cmd    string   `json:"cmd"`
 	Params []string `json:"params"`
 }
 
 type WSResponse struct {
-	ID      string   `json:"id"`
-	Cmd     string   `json:"cmd"`
-	Success bool     `json:"success"`
-	Time    int64    `json:"time"`
-	Data    []string `json:"data,omitempty"`
+	ID      string `json:"id"`
+	Event   string `json:"event"`
+	Success bool   `json:"success"`
+	Ts      int64  `json:"ts"`
+	Data    any    `json:"data,omitempty"`
 }
 
 type WSKlineUpdate struct {
@@ -226,8 +234,20 @@ type OrderResponse struct {
 }
 
 func (c *Client) SetCredentials(creds map[string]string) {
-	pdk.SetVar("apiKey", []byte(creds["apiKey"]))
-	pdk.SetVar("apiSecret", []byte(creds["apiSecret"]))
+	// Store applicationID
+	if appID, ok := creds["applicationID"]; ok {
+		pdk.SetVar("applicationID", []byte(appID))
+	}
+
+	// Store API key
+	if key, ok := creds["key"]; ok {
+		pdk.SetVar("apiKey", []byte(key))
+	}
+
+	// Store API secret
+	if secret, ok := creds["secret"]; ok {
+		pdk.SetVar("apiSecret", []byte(secret))
+	}
 }
 
 // GetName returns the name of the data source
@@ -239,14 +259,14 @@ func (c *Client) GetCredentialFields() ([]dt.CredentialField, error) {
 	return []dt.CredentialField{
 		{
 			Label:    "Application ID",
-			Name:     "app_id",
+			Name:     "applicationID", // Changed from "app_id" to match terminal convention
 			Required: true,
 			Encrypt:  true,
-			Mask:     true,
+			Mask:     false, // Don't show masked - terminal will handle display
 		},
 		{
 			Label:       "API Key",
-			Name:        "api_key",
+			Name:        "key", // Changed from "api_key" to match terminal convention
 			Description: "Generate here: https://woox.io/en/account/sub-account",
 			Required:    true,
 			Encrypt:     true,
@@ -254,10 +274,10 @@ func (c *Client) GetCredentialFields() ([]dt.CredentialField, error) {
 		},
 		{
 			Label:    "API Secret",
-			Name:     "api_secret",
+			Name:     "secret", // Changed from "api_secret" to match terminal convention
 			Required: true,
 			Encrypt:  true,
-			Mask:     true,
+			Mask:     false, // Don't show at all - terminal will handle display
 		},
 	}, nil
 }
@@ -429,6 +449,13 @@ func (c *Client) PrepareStream(request dt.StreamSetupRequest) (dt.StreamSetupRes
 		}, nil
 	}
 
+	// Convert interval (timeframe) to WooX kline format
+	// According to WooX docs, valid values are: 1m/5m/15m/30m/1h/4h/12h/1d/1w/1mon/1y
+	timeframe := "1m" // default
+	if interval != "" {
+		timeframe = interval
+	}
+
 	// Determine WebSocket URL based on environment and authentication
 	var wsURL string
 	var initialMessages []string
@@ -459,30 +486,45 @@ func (c *Client) PrepareStream(request dt.StreamSetupRequest) (dt.StreamSetupRes
 			"listen_key":    listenKey[:8] + "...", // Log only first 8 chars for security
 		})
 	} else {
-		// Public WebSocket connection
+		// Public WebSocket connection - Use WebSocket API V2 with application_id
+		// URL format: wss://wss.woox.io/ws/stream/{application_id}
+
+		// Get applicationID from plugin variables
+		appIDBytes := pdk.GetVar("applicationID")
+		if appIDBytes == nil || len(appIDBytes) == 0 {
+			c.log.Error("applicationID not found in plugin variables")
+			return dt.StreamSetupResponse{
+				Success: false,
+				Error:   "WooX Application ID not configured. Please add your WooX credentials (Application ID, API Key, API Secret) in the data source settings.",
+			}, nil
+		}
+		applicationID := string(appIDBytes)
+
+		c.log.InfoWithData("Using WooX Application ID for WebSocket", map[string]any{
+			"application_id_prefix": applicationID[:min(8, len(applicationID))],
+		})
+
 		if strings.Contains(c.baseURL, "staging") {
-			wsURL = "wss://wss.staging.woox.io/v3/public"
+			wsURL = fmt.Sprintf("wss://wss.staging.woox.io/ws/stream/%s", applicationID)
 		} else {
-			wsURL = "wss://wss.woox.io/v3/public"
+			wsURL = fmt.Sprintf("wss://wss.woox.io/ws/stream/%s", applicationID)
 		}
 
 		c.log.InfoWithData(fmt.Sprintf("Preparing public stream for %s", symbol), map[string]any{
 			"websocket_url": wsURL,
+			"symbol":        symbol,
+			"timeframe":     timeframe,
 		})
 	}
 
-	// Convert interval (timeframe) to WooX kline format
-	timeframe := "1m" // default
-	if interval != "" {
-		timeframe = interval
-	}
-
-	// Create subscription message
-	topic := fmt.Sprintf("kline@%s@%s", symbol, timeframe)
+	// Create subscription message for WebSocket API V2
+	// Topic format: {symbol}@kline_{time}
+	// Example: "SPOT_BTC_USDT@kline_1m"
+	topic := fmt.Sprintf("%s@kline_%s", symbol, timeframe)
 	subscribeMsg := WSSubscribeMessage{
-		ID:     "sub_1",
-		Cmd:    "SUBSCRIBE",
-		Params: []string{topic},
+		ID:    "sub_1",
+		Event: "subscribe",
+		Topic: topic,
 	}
 
 	msgBytes, err := json.Marshal(subscribeMsg)
@@ -510,10 +552,10 @@ func (c *Client) HandleStreamMessage(request dt.StreamMessageRequest) (dt.Stream
 		"message": request.Message,
 	})
 
-	// Try to parse as subscription response first
+	// Try to parse as subscription response first (WebSocket V2 format)
 	var wsResponse WSResponse
 	if err := json.Unmarshal([]byte(request.Message), &wsResponse); err == nil {
-		if wsResponse.Cmd == "SUBSCRIBE" && wsResponse.Success {
+		if wsResponse.Event == "subscribe" && wsResponse.Success {
 			// Subscription successful - ignore
 			return dt.StreamMessageResponse{
 				Success: true,
@@ -522,10 +564,11 @@ func (c *Client) HandleStreamMessage(request dt.StreamMessageRequest) (dt.Stream
 		}
 	}
 
-	// Try to parse as kline update
+	// Try to parse as kline update (WebSocket V2 format)
 	var klineUpdate WSKlineUpdate
 	if err := json.Unmarshal([]byte(request.Message), &klineUpdate); err == nil {
-		if strings.HasPrefix(klineUpdate.Topic, "kline@") {
+		// Topic format: {symbol}@kline_{time}, e.g., "SPOT_BTC_USDT@kline_1m"
+		if strings.Contains(klineUpdate.Topic, "@kline_") {
 			// Convert to OHLCV record
 			record, err := c.convertKlineToOHLCV(klineUpdate)
 			if err != nil {
