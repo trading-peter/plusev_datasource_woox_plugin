@@ -554,12 +554,16 @@ func (c *Client) HandleStreamMessage(request dt.StreamMessageRequest) (dt.Stream
 			"id":      wsResponse.ID,
 		})
 
-		// Handle ping messages - just ignore them (server expects no pong response)
+		// Handle ping messages - send pong response
 		if wsResponse.Event == "ping" {
-			c.log.Debug("Received ping from WooX server, ignoring")
+			c.log.Debug("Received ping from WooX server, sending pong")
+			// WooX expects a pong message in response to ping
+			// Format: {"event":"pong","ts":<timestamp>}
+			pongMsg := fmt.Sprintf(`{"event":"pong","ts":%d}`, wsResponse.Ts)
 			return dt.StreamMessageResponse{
-				Success: true,
-				Action:  "ignore",
+				Success:     true,
+				Action:      "send",
+				SendMessage: pongMsg,
 			}, nil
 		}
 
@@ -642,6 +646,13 @@ func (c *Client) HandleConnectionEvent(event dt.StreamConnectionEvent) (dt.Strea
 	})
 
 	switch event.EventType {
+	case "connecting":
+		c.log.Info("WebSocket connecting...")
+		// Connection attempt in progress
+		return dt.StreamConnectionResponse{
+			Success: true,
+			Action:  "ignore",
+		}, nil
 	case "connected":
 		c.log.Info("WebSocket connected successfully")
 		// Connection established successfully
@@ -660,10 +671,11 @@ func (c *Client) HandleConnectionEvent(event dt.StreamConnectionEvent) (dt.Strea
 		c.log.ErrorWithData("WebSocket error occurred", map[string]any{
 			"error": event.Error,
 		})
-		// Error occurred - attempt reconnection
+		// Error occurred - do NOT reconnect here, wait for disconnected event
+		// This prevents double reconnection attempts
 		return dt.StreamConnectionResponse{
 			Success: true,
-			Action:  "reconnect",
+			Action:  "ignore",
 		}, nil
 	default:
 		c.log.InfoWithData("Unknown connection event", map[string]any{
