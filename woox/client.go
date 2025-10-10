@@ -71,16 +71,16 @@ type InstrumentsResponse struct {
 }
 
 type KlineData struct {
-	Symbol         string `json:"symbol"`
-	Open           string `json:"open"`
-	Close          string `json:"close"`
-	High           string `json:"high"`
-	Low            string `json:"low"`
-	Volume         string `json:"volume"`
-	Amount         string `json:"amount"`
-	Type           string `json:"type"`
-	StartTimestamp int64  `json:"startTimestamp"`
-	EndTimestamp   int64  `json:"endTimestamp"`
+	Symbol         string  `json:"symbol"`
+	Open           float64 `json:"open"`
+	Close          float64 `json:"close"`
+	High           float64 `json:"high"`
+	Low            float64 `json:"low"`
+	Volume         float64 `json:"volume"`
+	Amount         float64 `json:"amount"`
+	Type           string  `json:"type"`
+	StartTimestamp int64   `json:"start_timestamp"` // Note: snake_case as per API docs
+	EndTimestamp   int64   `json:"end_timestamp"`   // Note: snake_case as per API docs
 }
 
 type KlineResponse struct {
@@ -121,18 +121,16 @@ type WSKlineUpdate struct {
 }
 
 type WSKlineData struct {
-	Symbol         string `json:"s"`   // symbol
-	Type           string `json:"t"`   // kline type
-	Open           string `json:"o"`   // open
-	Close          string `json:"c"`   // close
-	High           string `json:"h"`   // high
-	Low            string `json:"l"`   // low
-	Volume         string `json:"v"`   // volume in base token
-	Amount         string `json:"a"`   // amount in USDT
-	StartTimestamp int64  `json:"st"`  // kline start timestamp
-	EndTimestamp   int64  `json:"et"`  // kline end timestamp
-	Timestamp      int64  `json:"ts"`  // kline generation time
-	TradeTimestamp int64  `json:"tts"` // last trade time
+	Symbol    string  `json:"symbol"`    // symbol name
+	Type      string  `json:"type"`      // kline type (1m, 5m, etc.)
+	Open      float64 `json:"open"`      // open price
+	Close     float64 `json:"close"`     // close price
+	High      float64 `json:"high"`      // high price
+	Low       float64 `json:"low"`       // low price
+	Volume    float64 `json:"volume"`    // volume in base token
+	Amount    float64 `json:"amount"`    // amount in quote currency
+	StartTime int64   `json:"startTime"` // kline start timestamp (milliseconds)
+	EndTime   int64   `json:"endTime"`   // kline end timestamp (milliseconds)
 }
 
 // Listen Key API structures for private WebSocket authentication
@@ -255,18 +253,18 @@ func (c *Client) GetName() string {
 	return c.name
 }
 
-func (c *Client) GetCredentialFields() ([]dt.CredentialField, error) {
-	return []dt.CredentialField{
+func (c *Client) GetConfigFields() []dt.ConfigField {
+	return []dt.ConfigField{
 		{
 			Label:    "Application ID",
-			Name:     "applicationID", // Changed from "app_id" to match terminal convention
+			Name:     "applicationID",
 			Required: true,
 			Encrypt:  true,
-			Mask:     false, // Don't show masked - terminal will handle display
+			Mask:     false,
 		},
 		{
 			Label:       "API Key",
-			Name:        "key", // Changed from "api_key" to match terminal convention
+			Name:        "key",
 			Description: "Generate here: https://woox.io/en/account/sub-account",
 			Required:    true,
 			Encrypt:     true,
@@ -274,16 +272,16 @@ func (c *Client) GetCredentialFields() ([]dt.CredentialField, error) {
 		},
 		{
 			Label:    "API Secret",
-			Name:     "secret", // Changed from "api_secret" to match terminal convention
+			Name:     "secret",
 			Required: true,
 			Encrypt:  true,
-			Mask:     false, // Don't show at all - terminal will handle display
+			Mask:     true,
 		},
-	}, nil
+	}
 }
 
 // GetMarkets returns all available trading markets from WooX
-func (c *Client) GetMarkets() ([]dt.MarketMeta, error) {
+func (c *Client) GetMarkets() ([]dt.Market, error) {
 	req := &rt.Request{
 		Method: "GET",
 		URL:    c.baseURL + "/v3/public/instruments",
@@ -305,7 +303,7 @@ func (c *Client) GetMarkets() ([]dt.MarketMeta, error) {
 		return nil, fmt.Errorf("WooX API returned success=false")
 	}
 
-	var markets []dt.MarketMeta
+	var markets []dt.Market
 	for _, instrument := range response.Data.Rows {
 		// Skip inactive instruments
 		if instrument.Status != "TRADING" {
@@ -321,8 +319,8 @@ func (c *Client) GetMarkets() ([]dt.MarketMeta, error) {
 			assetType = "spot"
 		}
 
-		markets = append(markets, dt.MarketMeta{
-			Name:      instrument.Symbol,
+		markets = append(markets, dt.Market{
+			Symbol:    instrument.Symbol,
 			Base:      instrument.BaseAsset,
 			Quote:     instrument.QuoteAsset,
 			AssetType: assetType,
@@ -334,48 +332,62 @@ func (c *Client) GetMarkets() ([]dt.MarketMeta, error) {
 
 // GetTimeframes returns the timeframes supported by WooX v3
 func (c *Client) GetTimeframes() []dt.Timeframe {
-	// WooX v3 supported timeframes: 1m/3m/5m/15m/30m/1h/2h/4h/6h/12h/1d/1w/1mon/1y
+	// WooX supported timeframes according to API docs: 1m/5m/15m/30m/1h/4h/12h/1d/1w/1mon/1y
 	return []dt.Timeframe{
-		{Label: "1m", ApiValue: "1m", Interval: 60},
-		{Label: "3m", ApiValue: "3m", Interval: 180},
-		{Label: "5m", ApiValue: "5m", Interval: 300},
-		{Label: "15m", ApiValue: "15m", Interval: 900},
-		{Label: "30m", ApiValue: "30m", Interval: 1800},
-		{Label: "1h", ApiValue: "1h", Interval: 3600},
-		{Label: "2h", ApiValue: "2h", Interval: 7200},
-		{Label: "4h", ApiValue: "4h", Interval: 14400},
-		{Label: "6h", ApiValue: "6h", Interval: 21600},
-		{Label: "12h", ApiValue: "12h", Interval: 43200},
-		{Label: "1d", ApiValue: "1d", Interval: 86400},
-		{Label: "1w", ApiValue: "1w", Interval: 604800},
-		{Label: "1M", ApiValue: "1mon", Interval: 2592000}, // Approximate
-		{Label: "1y", ApiValue: "1y", Interval: 31536000},  // Approximate
+		{Label: "1 Minute", Value: "1m", Interval: 60},
+		{Label: "5 Minutes", Value: "5m", Interval: 300},
+		{Label: "15 Minutes", Value: "15m", Interval: 900},
+		{Label: "30 Minutes", Value: "30m", Interval: 1800},
+		{Label: "1 Hour", Value: "1h", Interval: 3600},
+		{Label: "4 Hours", Value: "4h", Interval: 14400},
+		{Label: "12 Hours", Value: "12h", Interval: 43200},
+		{Label: "1 Day", Value: "1d", Interval: 86400},
+		{Label: "1 Week", Value: "1w", Interval: 604800},
+		{Label: "1 Month", Value: "1mon", Interval: 2592000}, // Approximate
+		{Label: "1 Year", Value: "1y", Interval: 31536000},   // Approximate
 	}
 }
 
-// GetOHLCV fetches historical OHLCV data from WooX v3
+// GetOHLCV fetches historical OHLCV data from WooX
 func (c *Client) GetOHLCV(params dt.OHLCVParams) ([]dt.OHLCVRecord, error) {
-	// Build query parameters for v3 API
+	// Build query parameters according to WooX API docs
+	// For historical data: GET https://api-pub.woo.org/v1/hist/kline
+	// For recent data: GET /v1/public/kline
 	queryParams := fmt.Sprintf("symbol=%s&type=%s", params.Symbol, params.Timeframe)
 
-	// Use before/after pagination instead of start_t/end_t
+	// WooX uses start_time and end_time with 13-digit millisecond timestamps
 	if params.StartTime > 0 {
-		// Convert to milliseconds for v3 API
-		queryParams += fmt.Sprintf("&after=%d", params.StartTime*1000)
+		// Convert from seconds to milliseconds
+		queryParams += fmt.Sprintf("&start_time=%d", params.StartTime*1000)
 	}
 
 	if params.EndTime > 0 {
-		// Convert to milliseconds for v3 API
-		queryParams += fmt.Sprintf("&before=%d", params.EndTime*1000)
+		// Convert from seconds to milliseconds
+		queryParams += fmt.Sprintf("&end_time=%d", params.EndTime*1000)
 	}
 
+	// Use 'size' parameter for limit (default 100, max 1000)
 	if params.Limit > 0 {
-		queryParams += fmt.Sprintf("&limit=%d", params.Limit)
+		queryParams += fmt.Sprintf("&size=%d", params.Limit)
+	} else {
+		queryParams += "&size=100" // Default to 100
+	}
+
+	// Determine endpoint based on whether we need historical data
+	var endpoint string
+	useHistorical := params.StartTime > 0 || params.EndTime > 0
+
+	if useHistorical {
+		// Use the historical endpoint on the pub domain
+		endpoint = "https://api-pub.woox.io/v1/hist/kline?" + queryParams
+	} else {
+		// Use the recent data endpoint
+		endpoint = c.baseURL + "/v1/public/kline?" + queryParams
 	}
 
 	req := &rt.Request{
 		Method: "GET",
-		URL:    c.baseURL + "/v3/public/klineHistory?" + queryParams,
+		URL:    endpoint,
 		Headers: map[string]string{
 			"Content-Type": "application/json",
 		},
@@ -396,39 +408,14 @@ func (c *Client) GetOHLCV(params dt.OHLCVParams) ([]dt.OHLCVRecord, error) {
 
 	var records []dt.OHLCVRecord
 	for _, kline := range response.Data.Rows {
-		// Parse string values to float64
-		open, err := strconv.ParseFloat(kline.Open, 64)
-		if err != nil {
-			continue // Skip invalid data
-		}
-
-		high, err := strconv.ParseFloat(kline.High, 64)
-		if err != nil {
-			continue
-		}
-
-		low, err := strconv.ParseFloat(kline.Low, 64)
-		if err != nil {
-			continue
-		}
-
-		close, err := strconv.ParseFloat(kline.Close, 64)
-		if err != nil {
-			continue
-		}
-
-		volume, err := strconv.ParseFloat(kline.Volume, 64)
-		if err != nil {
-			continue
-		}
-
+		// Convert float64 values to strings for arbitrary precision
 		records = append(records, dt.OHLCVRecord{
 			Timestamp: kline.StartTimestamp / 1000, // Convert from milliseconds to seconds
-			Open:      open,
-			High:      high,
-			Low:       low,
-			Close:     close,
-			Volume:    volume,
+			Open:      fmt.Sprintf("%.8f", kline.Open),
+			High:      fmt.Sprintf("%.8f", kline.High),
+			Low:       fmt.Sprintf("%.8f", kline.Low),
+			Close:     fmt.Sprintf("%.8f", kline.Close),
+			Volume:    fmt.Sprintf("%.8f", kline.Volume),
 		})
 	}
 
@@ -625,39 +612,14 @@ func (c *Client) HandleConnectionEvent(event dt.StreamConnectionEvent) (dt.Strea
 
 // convertKlineToOHLCV converts WooX kline data to OHLCV record
 func (c *Client) convertKlineToOHLCV(update WSKlineUpdate) (dt.OHLCVRecord, error) {
-	// Parse string values to float64
-	open, err := strconv.ParseFloat(update.Data.Open, 64)
-	if err != nil {
-		return dt.OHLCVRecord{}, fmt.Errorf("failed to parse open price: %w", err)
-	}
-
-	high, err := strconv.ParseFloat(update.Data.High, 64)
-	if err != nil {
-		return dt.OHLCVRecord{}, fmt.Errorf("failed to parse high price: %w", err)
-	}
-
-	low, err := strconv.ParseFloat(update.Data.Low, 64)
-	if err != nil {
-		return dt.OHLCVRecord{}, fmt.Errorf("failed to parse low price: %w", err)
-	}
-
-	close, err := strconv.ParseFloat(update.Data.Close, 64)
-	if err != nil {
-		return dt.OHLCVRecord{}, fmt.Errorf("failed to parse close price: %w", err)
-	}
-
-	volume, err := strconv.ParseFloat(update.Data.Volume, 64)
-	if err != nil {
-		return dt.OHLCVRecord{}, fmt.Errorf("failed to parse volume: %w", err)
-	}
-
+	// WooX returns numeric values as float64, convert to strings for arbitrary precision
 	return dt.OHLCVRecord{
-		Timestamp: update.Data.StartTimestamp / 1000, // Convert from milliseconds to seconds
-		Open:      open,
-		High:      high,
-		Low:       low,
-		Close:     close,
-		Volume:    volume,
+		Timestamp: update.Data.StartTime / 1000, // Convert from milliseconds to seconds
+		Open:      fmt.Sprintf("%.8f", update.Data.Open),
+		High:      fmt.Sprintf("%.8f", update.Data.High),
+		Low:       fmt.Sprintf("%.8f", update.Data.Low),
+		Close:     fmt.Sprintf("%.8f", update.Data.Close),
+		Volume:    fmt.Sprintf("%.8f", update.Data.Volume),
 	}, nil
 }
 
