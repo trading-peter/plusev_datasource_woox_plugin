@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/extism/go-pdk"
 	"github.com/plusev-terminal/go-plugin-common/logging"
 
 	dt "github.com/plusev-terminal/go-plugin-common/datasrc/types"
@@ -19,10 +18,13 @@ import (
 
 // Client represents a client for the WooX v3 API
 type Client struct {
-	name      string
-	baseURL   string
-	requester rt.RequestDoer
-	log       *logging.Logger
+	name          string
+	baseURL       string
+	requester     rt.RequestDoer
+	log           *logging.Logger
+	applicationID string // WooX Application ID (decrypted)
+	apiKey        string // API Key (decrypted)
+	apiSecret     string // API Secret (decrypted)
 }
 
 // NewClient creates a new WooX API client
@@ -232,19 +234,17 @@ type OrderResponse struct {
 }
 
 func (c *Client) SetCredentials(creds map[string]string) {
-	// Store applicationID
+	// Store decrypted credentials in the client struct (NOT in pdk.SetVar!)
 	if appID, ok := creds["applicationID"]; ok {
-		pdk.SetVar("applicationID", []byte(appID))
+		c.applicationID = appID
 	}
 
-	// Store API key
 	if key, ok := creds["key"]; ok {
-		pdk.SetVar("apiKey", []byte(key))
+		c.apiKey = key
 	}
 
-	// Store API secret
 	if secret, ok := creds["secret"]; ok {
-		pdk.SetVar("apiSecret", []byte(secret))
+		c.apiSecret = secret
 	}
 }
 
@@ -476,25 +476,23 @@ func (c *Client) PrepareStream(request dt.StreamSetupRequest) (dt.StreamSetupRes
 		// Public WebSocket connection - Use WebSocket API V2 with application_id
 		// URL format: wss://wss.woox.io/ws/stream/{application_id}
 
-		// Get applicationID from plugin variables
-		appIDBytes := pdk.GetVar("applicationID")
-		if appIDBytes == nil || len(appIDBytes) == 0 {
-			c.log.Error("applicationID not found in plugin variables")
+		// Use the decrypted applicationID from the client struct
+		if c.applicationID == "" {
+			c.log.Error("applicationID not configured")
 			return dt.StreamSetupResponse{
 				Success: false,
 				Error:   "WooX Application ID not configured. Please add your WooX credentials (Application ID, API Key, API Secret) in the data source settings.",
 			}, nil
 		}
-		applicationID := string(appIDBytes)
 
 		c.log.InfoWithData("Using WooX Application ID for WebSocket", map[string]any{
-			"application_id_prefix": applicationID[:min(8, len(applicationID))],
+			"application_id_prefix": c.applicationID[:min(8, len(c.applicationID))],
 		})
 
 		if strings.Contains(c.baseURL, "staging") {
-			wsURL = fmt.Sprintf("wss://wss.staging.woox.io/ws/stream/%s", applicationID)
+			wsURL = fmt.Sprintf("wss://wss.staging.woox.io/ws/stream/%s", c.applicationID)
 		} else {
-			wsURL = fmt.Sprintf("wss://wss.woox.io/ws/stream/%s", applicationID)
+			wsURL = fmt.Sprintf("wss://wss.woox.io/ws/stream/%s", c.applicationID)
 		}
 
 		c.log.InfoWithData(fmt.Sprintf("Preparing public stream for %s", symbol), map[string]any{
@@ -524,6 +522,13 @@ func (c *Client) PrepareStream(request dt.StreamSetupRequest) (dt.StreamSetupRes
 
 	initialMessages = append(initialMessages, string(msgBytes))
 
+	c.log.InfoWithData("Stream setup complete", map[string]any{
+		"websocket_url":     wsURL,
+		"topic":             topic,
+		"subscribe_message": string(msgBytes),
+		"has_headers":       len(headers) > 0,
+	})
+
 	return dt.StreamSetupResponse{
 		Success:         true,
 		WebSocketURL:    wsURL,
@@ -535,35 +540,73 @@ func (c *Client) PrepareStream(request dt.StreamSetupRequest) (dt.StreamSetupRes
 
 // HandleStreamMessage processes incoming stream messages
 func (c *Client) HandleStreamMessage(request dt.StreamMessageRequest) (dt.StreamMessageResponse, error) {
-	c.log.InfoWithData(fmt.Sprintf("Processing message for stream %s", request.StreamID), map[string]any{
-		"message": request.Message,
+	c.log.InfoWithData(fmt.Sprintf("Processing WebSocket message for stream %s", request.StreamID), map[string]any{
+		"message_length": len(request.Message),
+		"message":        request.Message,
 	})
 
 	// Try to parse as subscription response first (WebSocket V2 format)
 	var wsResponse WSResponse
 	if err := json.Unmarshal([]byte(request.Message), &wsResponse); err == nil {
+		c.log.InfoWithData("Parsed as WSResponse", map[string]any{
+			"event":   wsResponse.Event,
+			"success": wsResponse.Success,
+			"id":      wsResponse.ID,
+		})
+
+		// Handle ping messages - just ignore them (server expects no pong response)
+		if wsResponse.Event == "ping" {
+			c.log.Debug("Received ping from WooX server, ignoring")
+			return dt.StreamMessageResponse{
+				Success: true,
+				Action:  "ignore",
+			}, nil
+		}
+
 		if wsResponse.Event == "subscribe" && wsResponse.Success {
+			c.log.Info("Subscription confirmed by WooX WebSocket server")
 			// Subscription successful - ignore
 			return dt.StreamMessageResponse{
 				Success: true,
 				Action:  "ignore",
 			}, nil
 		}
+	} else {
+		c.log.InfoWithData("Failed to parse as WSResponse", map[string]any{
+			"error": err.Error(),
+		})
 	}
 
 	// Try to parse as kline update (WebSocket V2 format)
 	var klineUpdate WSKlineUpdate
 	if err := json.Unmarshal([]byte(request.Message), &klineUpdate); err == nil {
+		c.log.InfoWithData("Parsed as WSKlineUpdate", map[string]any{
+			"topic": klineUpdate.Topic,
+			"data":  klineUpdate.Data,
+		})
 		// Topic format: {symbol}@kline_{time}, e.g., "SPOT_BTC_USDT@kline_1m"
 		if strings.Contains(klineUpdate.Topic, "@kline_") {
+			c.log.Info("Valid kline topic detected, converting to OHLCV")
 			// Convert to OHLCV record
 			record, err := c.convertKlineToOHLCV(klineUpdate)
 			if err != nil {
+				c.log.ErrorWithData("Failed to convert kline to OHLCV", map[string]any{
+					"error": err.Error(),
+				})
 				return dt.StreamMessageResponse{
 					Success: true,
 					Action:  "ignore",
 				}, nil
 			}
+
+			c.log.InfoWithData("Successfully converted kline to OHLCV", map[string]any{
+				"timestamp": record.Timestamp,
+				"open":      record.Open,
+				"high":      record.High,
+				"low":       record.Low,
+				"close":     record.Close,
+				"volume":    record.Volume,
+			})
 
 			return dt.StreamMessageResponse{
 				Success:  true,
@@ -571,10 +614,19 @@ func (c *Client) HandleStreamMessage(request dt.StreamMessageRequest) (dt.Stream
 				DataType: "ohlcv",
 				Data:     record,
 			}, nil
+		} else {
+			c.log.InfoWithData("Topic does not contain @kline_", map[string]any{
+				"topic": klineUpdate.Topic,
+			})
 		}
+	} else {
+		c.log.InfoWithData("Failed to parse as WSKlineUpdate", map[string]any{
+			"error": err.Error(),
+		})
 	}
 
 	// Unknown message - ignore
+	c.log.Warn("Unknown message format, ignoring")
 	return dt.StreamMessageResponse{
 		Success: true,
 		Action:  "ignore",
@@ -583,26 +635,40 @@ func (c *Client) HandleStreamMessage(request dt.StreamMessageRequest) (dt.Stream
 
 // HandleConnectionEvent handles stream connection events
 func (c *Client) HandleConnectionEvent(event dt.StreamConnectionEvent) (dt.StreamConnectionResponse, error) {
+	c.log.InfoWithData("WebSocket connection event received", map[string]any{
+		"event_type": event.EventType,
+		"stream_id":  event.StreamID,
+		"error":      event.Error,
+	})
+
 	switch event.EventType {
 	case "connected":
+		c.log.Info("WebSocket connected successfully")
 		// Connection established successfully
 		return dt.StreamConnectionResponse{
 			Success: true,
 			Action:  "ignore",
 		}, nil
 	case "disconnected":
+		c.log.Warn("WebSocket disconnected, requesting reconnection")
 		// Connection lost - request reconnection
 		return dt.StreamConnectionResponse{
 			Success: true,
 			Action:  "reconnect",
 		}, nil
 	case "error":
+		c.log.ErrorWithData("WebSocket error occurred", map[string]any{
+			"error": event.Error,
+		})
 		// Error occurred - attempt reconnection
 		return dt.StreamConnectionResponse{
 			Success: true,
 			Action:  "reconnect",
 		}, nil
 	default:
+		c.log.InfoWithData("Unknown connection event", map[string]any{
+			"event_type": event.EventType,
+		})
 		return dt.StreamConnectionResponse{
 			Success: true,
 			Action:  "ignore",
@@ -669,19 +735,14 @@ func (c *Client) generateWooXSignature(timestamp string, method, path, body stri
 	// Create the string to sign: timestamp + method + path + body
 	message := timestamp + method + path + body
 
-	apiSecret := pdk.GetVar("apiSecret")
-
-	h := hmac.New(sha256.New, apiSecret)
+	h := hmac.New(sha256.New, []byte(c.apiSecret))
 	h.Write([]byte(message))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
 // addAuthHeaders adds WooX authentication headers to a request
 func (c *Client) addAuthHeaders(req *rt.Request, body string) {
-	apiKey := pdk.GetVar("apiKey")
-	apiSecret := pdk.GetVar("apiSecret")
-
-	if apiKey == nil || apiSecret == nil {
+	if c.apiKey == "" || c.apiSecret == "" {
 		return // No authentication configured
 	}
 
@@ -699,7 +760,7 @@ func (c *Client) addAuthHeaders(req *rt.Request, body string) {
 		req.Headers = make(map[string]string)
 	}
 
-	req.Headers["x-api-key"] = string(apiKey)
+	req.Headers["x-api-key"] = c.apiKey
 	req.Headers["x-api-timestamp"] = timestamp
 	req.Headers["x-api-signature"] = signature
 	req.Headers["Content-Type"] = "application/json"
@@ -707,10 +768,7 @@ func (c *Client) addAuthHeaders(req *rt.Request, body string) {
 
 // isAuthenticated returns true if the client has authentication credentials
 func (c *Client) isAuthenticated() bool {
-	apiKey := pdk.GetVar("apiKey")
-	apiSecret := pdk.GetVar("apiSecret")
-
-	return apiKey != nil && apiSecret != nil
+	return c.apiKey != "" && c.apiSecret != ""
 }
 
 // generateListenKey generates a listen key for private WebSocket connections

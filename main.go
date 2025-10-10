@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 
+	"github.com/extism/go-pdk"
 	"github.com/plusev-terminal/go-plugin-common/datasrc"
 	dt "github.com/plusev-terminal/go-plugin-common/datasrc/types"
 	m "github.com/plusev-terminal/go-plugin-common/meta"
@@ -83,6 +84,9 @@ func (p *WooXPlugin) OnInit(config *datasrc.ConfigStore) error {
 	}
 
 	p.client.SetCredentials(credentials)
+
+	// Store reference for stream handling exports
+	registeredPluginInstance = p
 
 	return nil
 }
@@ -223,3 +227,66 @@ func init() {
 func main() {
 	// Required for WASM, but can be empty
 }
+
+// ============================================================================
+// Additional WASM Exports for Stream Handling
+// ============================================================================
+
+//go:wasmexport handle_stream_message
+func handle_stream_message() int32 {
+	// Get the plugin instance
+	plugin := registeredPluginInstance
+	if plugin == nil {
+		pdk.OutputJSON(dt.StreamMessageResponse{Success: false})
+		return 1
+	}
+
+	// Read the request
+	var req dt.StreamMessageRequest
+	if err := pdk.InputJSON(&req); err != nil {
+		pdk.OutputJSON(dt.StreamMessageResponse{Success: false})
+		return 1
+	}
+
+	// Call client's message handler
+	resp, err := plugin.client.HandleStreamMessage(req)
+	if err != nil {
+		pdk.OutputJSON(dt.StreamMessageResponse{Success: false})
+		return 1
+	}
+
+	// Write response
+	pdk.OutputJSON(resp)
+	return 0
+}
+
+//go:wasmexport handle_connection_event
+func handle_connection_event() int32 {
+	// Get the plugin instance
+	plugin := registeredPluginInstance
+	if plugin == nil {
+		pdk.OutputJSON(dt.StreamConnectionResponse{Success: false})
+		return 1
+	}
+
+	// Read the event
+	var event dt.StreamConnectionEvent
+	if err := pdk.InputJSON(&event); err != nil {
+		pdk.OutputJSON(dt.StreamConnectionResponse{Success: false})
+		return 1
+	}
+
+	// Call client's event handler
+	resp, err := plugin.client.HandleConnectionEvent(event)
+	if err != nil {
+		pdk.OutputJSON(dt.StreamConnectionResponse{Success: false})
+		return 1
+	}
+
+	// Write response
+	pdk.OutputJSON(resp)
+	return 0
+}
+
+// Store plugin instance for stream handling exports
+var registeredPluginInstance *WooXPlugin
