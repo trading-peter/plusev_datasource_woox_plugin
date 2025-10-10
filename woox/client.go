@@ -33,7 +33,7 @@ func NewClient(req rt.RequestDoer, baseURL string) *Client {
 		name:      "WooX",
 		baseURL:   baseURL,
 		requester: req,
-		log:       logging.NewLogger("WooX"),
+		log:       logging.NewLogger("woox-datasource"),
 	}
 }
 
@@ -467,39 +467,23 @@ func (c *Client) PrepareStream(request dt.StreamSetupRequest) (dt.StreamSetupRes
 
 		// Add listen key as query parameter
 		wsURL += "?listenKey=" + listenKey
-
-		c.log.InfoWithData(fmt.Sprintf("Preparing private stream for %s", symbol), map[string]any{
-			"websocket_url": wsURL,
-			"listen_key":    listenKey[:8] + "...", // Log only first 8 chars for security
-		})
 	} else {
 		// Public WebSocket connection - Use WebSocket API V2 with application_id
 		// URL format: wss://wss.woox.io/ws/stream/{application_id}
 
 		// Use the decrypted applicationID from the client struct
 		if c.applicationID == "" {
-			c.log.Error("applicationID not configured")
 			return dt.StreamSetupResponse{
 				Success: false,
 				Error:   "WooX Application ID not configured. Please add your WooX credentials (Application ID, API Key, API Secret) in the data source settings.",
 			}, nil
 		}
 
-		c.log.InfoWithData("Using WooX Application ID for WebSocket", map[string]any{
-			"application_id_prefix": c.applicationID[:min(8, len(c.applicationID))],
-		})
-
 		if strings.Contains(c.baseURL, "staging") {
 			wsURL = fmt.Sprintf("wss://wss.staging.woox.io/ws/stream/%s", c.applicationID)
 		} else {
 			wsURL = fmt.Sprintf("wss://wss.woox.io/ws/stream/%s", c.applicationID)
 		}
-
-		c.log.InfoWithData(fmt.Sprintf("Preparing public stream for %s", symbol), map[string]any{
-			"websocket_url": wsURL,
-			"symbol":        symbol,
-			"timeframe":     timeframe,
-		})
 	}
 
 	// Create subscription message for WebSocket API V2
@@ -522,13 +506,6 @@ func (c *Client) PrepareStream(request dt.StreamSetupRequest) (dt.StreamSetupRes
 
 	initialMessages = append(initialMessages, string(msgBytes))
 
-	c.log.InfoWithData("Stream setup complete", map[string]any{
-		"websocket_url":     wsURL,
-		"topic":             topic,
-		"subscribe_message": string(msgBytes),
-		"has_headers":       len(headers) > 0,
-	})
-
 	return dt.StreamSetupResponse{
 		Success:         true,
 		WebSocketURL:    wsURL,
@@ -540,23 +517,11 @@ func (c *Client) PrepareStream(request dt.StreamSetupRequest) (dt.StreamSetupRes
 
 // HandleStreamMessage processes incoming stream messages
 func (c *Client) HandleStreamMessage(request dt.StreamMessageRequest) (dt.StreamMessageResponse, error) {
-	c.log.InfoWithData(fmt.Sprintf("Processing WebSocket message for stream %s", request.StreamID), map[string]any{
-		"message_length": len(request.Message),
-		"message":        request.Message,
-	})
-
 	// Try to parse as subscription response first (WebSocket V2 format)
 	var wsResponse WSResponse
 	if err := json.Unmarshal([]byte(request.Message), &wsResponse); err == nil {
-		c.log.InfoWithData("Parsed as WSResponse", map[string]any{
-			"event":   wsResponse.Event,
-			"success": wsResponse.Success,
-			"id":      wsResponse.ID,
-		})
-
 		// Handle ping messages - send pong response
 		if wsResponse.Event == "ping" {
-			c.log.Debug("Received ping from WooX server, sending pong")
 			// WooX expects a pong message in response to ping
 			// Format: {"event":"pong","ts":<timestamp>}
 			pongMsg := fmt.Sprintf(`{"event":"pong","ts":%d}`, wsResponse.Ts)
@@ -568,49 +533,27 @@ func (c *Client) HandleStreamMessage(request dt.StreamMessageRequest) (dt.Stream
 		}
 
 		if wsResponse.Event == "subscribe" && wsResponse.Success {
-			c.log.Info("Subscription confirmed by WooX WebSocket server")
 			// Subscription successful - ignore
 			return dt.StreamMessageResponse{
 				Success: true,
 				Action:  "ignore",
 			}, nil
 		}
-	} else {
-		c.log.InfoWithData("Failed to parse as WSResponse", map[string]any{
-			"error": err.Error(),
-		})
 	}
 
 	// Try to parse as kline update (WebSocket V2 format)
 	var klineUpdate WSKlineUpdate
 	if err := json.Unmarshal([]byte(request.Message), &klineUpdate); err == nil {
-		c.log.InfoWithData("Parsed as WSKlineUpdate", map[string]any{
-			"topic": klineUpdate.Topic,
-			"data":  klineUpdate.Data,
-		})
 		// Topic format: {symbol}@kline_{time}, e.g., "SPOT_BTC_USDT@kline_1m"
 		if strings.Contains(klineUpdate.Topic, "@kline_") {
-			c.log.Info("Valid kline topic detected, converting to OHLCV")
 			// Convert to OHLCV record
 			record, err := c.convertKlineToOHLCV(klineUpdate)
 			if err != nil {
-				c.log.ErrorWithData("Failed to convert kline to OHLCV", map[string]any{
-					"error": err.Error(),
-				})
 				return dt.StreamMessageResponse{
 					Success: true,
 					Action:  "ignore",
 				}, nil
 			}
-
-			c.log.InfoWithData("Successfully converted kline to OHLCV", map[string]any{
-				"timestamp": record.Timestamp,
-				"open":      record.Open,
-				"high":      record.High,
-				"low":       record.Low,
-				"close":     record.Close,
-				"volume":    record.Volume,
-			})
 
 			return dt.StreamMessageResponse{
 				Success:  true,
@@ -618,19 +561,10 @@ func (c *Client) HandleStreamMessage(request dt.StreamMessageRequest) (dt.Stream
 				DataType: "ohlcv",
 				Data:     record,
 			}, nil
-		} else {
-			c.log.InfoWithData("Topic does not contain @kline_", map[string]any{
-				"topic": klineUpdate.Topic,
-			})
 		}
-	} else {
-		c.log.InfoWithData("Failed to parse as WSKlineUpdate", map[string]any{
-			"error": err.Error(),
-		})
 	}
 
 	// Unknown message - ignore
-	c.log.Warn("Unknown message format, ignoring")
 	return dt.StreamMessageResponse{
 		Success: true,
 		Action:  "ignore",
@@ -639,29 +573,20 @@ func (c *Client) HandleStreamMessage(request dt.StreamMessageRequest) (dt.Stream
 
 // HandleConnectionEvent handles stream connection events
 func (c *Client) HandleConnectionEvent(event dt.StreamConnectionEvent) (dt.StreamConnectionResponse, error) {
-	c.log.InfoWithData("WebSocket connection event received", map[string]any{
-		"event_type": event.EventType,
-		"stream_id":  event.StreamID,
-		"error":      event.Error,
-	})
-
 	switch event.EventType {
 	case "connecting":
-		c.log.Info("WebSocket connecting...")
 		// Connection attempt in progress
 		return dt.StreamConnectionResponse{
 			Success: true,
 			Action:  "ignore",
 		}, nil
 	case "connected":
-		c.log.Info("WebSocket connected successfully")
 		// Connection established successfully
 		return dt.StreamConnectionResponse{
 			Success: true,
 			Action:  "ignore",
 		}, nil
 	case "disconnected":
-		c.log.Warn("WebSocket disconnected, requesting reconnection")
 		// Connection lost - request reconnection
 		return dt.StreamConnectionResponse{
 			Success: true,
