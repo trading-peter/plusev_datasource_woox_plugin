@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 
-	"github.com/extism/go-pdk"
 	"github.com/plusev-terminal/go-plugin-common/datasrc"
 	dt "github.com/plusev-terminal/go-plugin-common/datasrc/types"
 	m "github.com/plusev-terminal/go-plugin-common/meta"
@@ -84,9 +83,6 @@ func (p *WooXPlugin) OnInit(config *datasrc.ConfigStore) error {
 	}
 
 	p.client.SetCredentials(credentials)
-
-	// Store reference for stream handling exports
-	registeredPluginInstance = p
 
 	return nil
 }
@@ -219,9 +215,18 @@ func (p *WooXPlugin) handleOHLCVStream(params map[string]any) dt.Response {
 // ============================================================================
 
 func init() {
-	// Register the plugin - this generates all WASM exports automatically
+	// Create plugin instance
+	plugin := &WooXPlugin{}
+
+	// Register the plugin - this generates all standard WASM exports automatically
 	// IMPORTANT: Must be in init(), not main(), so it runs before WASM exports are called
-	datasrc.RegisterPlugin(&WooXPlugin{})
+	datasrc.RegisterPlugin(plugin)
+
+	// Register stream handler - this generates handle_stream_message and handle_connection_event exports
+	// The client implements the StreamHandler interface (HandleStreamMessage, HandleConnectionEvent)
+	// NOTE: client will be initialized in OnInit, but we register it here so the exports are available
+	// The actual client instance will be set when OnInit is called
+	datasrc.RegisterStreamHandler(&streamHandlerWrapper{plugin: plugin})
 }
 
 func main() {
@@ -229,64 +234,25 @@ func main() {
 }
 
 // ============================================================================
-// Additional WASM Exports for Stream Handling
+// Stream Handler Wrapper
 // ============================================================================
 
-//go:wasmexport handle_stream_message
-func handle_stream_message() int32 {
-	// Get the plugin instance
-	plugin := registeredPluginInstance
-	if plugin == nil {
-		pdk.OutputJSON(dt.StreamMessageResponse{Success: false})
-		return 1
-	}
-
-	// Read the request
-	var req dt.StreamMessageRequest
-	if err := pdk.InputJSON(&req); err != nil {
-		pdk.OutputJSON(dt.StreamMessageResponse{Success: false})
-		return 1
-	}
-
-	// Call client's message handler
-	resp, err := plugin.client.HandleStreamMessage(req)
-	if err != nil {
-		pdk.OutputJSON(dt.StreamMessageResponse{Success: false})
-		return 1
-	}
-
-	// Write response
-	pdk.OutputJSON(resp)
-	return 0
+// streamHandlerWrapper wraps the plugin to provide StreamHandler interface
+// This allows us to register the stream handler before the client is initialized
+type streamHandlerWrapper struct {
+	plugin *WooXPlugin
 }
 
-//go:wasmexport handle_connection_event
-func handle_connection_event() int32 {
-	// Get the plugin instance
-	plugin := registeredPluginInstance
-	if plugin == nil {
-		pdk.OutputJSON(dt.StreamConnectionResponse{Success: false})
-		return 1
+func (w *streamHandlerWrapper) HandleStreamMessage(req dt.StreamMessageRequest) (dt.StreamMessageResponse, error) {
+	if w.plugin.client == nil {
+		return dt.StreamMessageResponse{Success: false, Action: "ignore"}, fmt.Errorf("client not initialized")
 	}
-
-	// Read the event
-	var event dt.StreamConnectionEvent
-	if err := pdk.InputJSON(&event); err != nil {
-		pdk.OutputJSON(dt.StreamConnectionResponse{Success: false})
-		return 1
-	}
-
-	// Call client's event handler
-	resp, err := plugin.client.HandleConnectionEvent(event)
-	if err != nil {
-		pdk.OutputJSON(dt.StreamConnectionResponse{Success: false})
-		return 1
-	}
-
-	// Write response
-	pdk.OutputJSON(resp)
-	return 0
+	return w.plugin.client.HandleStreamMessage(req)
 }
 
-// Store plugin instance for stream handling exports
-var registeredPluginInstance *WooXPlugin
+func (w *streamHandlerWrapper) HandleConnectionEvent(event dt.StreamConnectionEvent) (dt.StreamConnectionResponse, error) {
+	if w.plugin.client == nil {
+		return dt.StreamConnectionResponse{Success: false, Action: "ignore"}, fmt.Errorf("client not initialized")
+	}
+	return w.plugin.client.HandleConnectionEvent(event)
+}
