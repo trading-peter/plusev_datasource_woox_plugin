@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/plusev-terminal/go-plugin-common/datasrc"
+	cex "github.com/plusev-terminal/go-plugin-common/datasrc/cex"
 	dt "github.com/plusev-terminal/go-plugin-common/datasrc/types"
 	m "github.com/plusev-terminal/go-plugin-common/meta"
 	"github.com/plusev-terminal/go-plugin-common/requester"
@@ -54,6 +55,43 @@ func (p *WooXPlugin) GetMeta() m.Meta {
 	}
 }
 
+func (p *WooXPlugin) GetRateLimits() []dt.RateLimit {
+	// Define rate limits based on WooX API documentation
+	// Public endpoints: rate limit is based on IP address
+	// Private endpoints: rate limit is based on account (application ID)
+
+	return []dt.RateLimit{
+		// Public endpoints - IP-based rate limits (10 requests per 1 second per IP)
+		{
+			Command: "getMarkets", // GET /v1/public/info
+			Scope:   dt.RateLimitScopeIP,
+			RPS:     10.0,
+			Burst:   10,
+		},
+		{
+			Command: "getTimeframes", // No API call, returns static data
+			Scope:   dt.RateLimitScopeIP,
+			RPS:     10.0,
+			Burst:   10,
+		},
+		{
+			Command: "getOHLCV", // GET /v1/public/kline or /v1/hist/kline
+			Scope:   dt.RateLimitScopeIP,
+			RPS:     10.0,
+			Burst:   10,
+		},
+
+		// WebSocket streams - Connection limits per IP (1000 concurrent)
+		// Per account: 80 concurrent connections max
+		{
+			Command: "ohlcvStream",
+			Scope:   dt.RateLimitScopeAPIKey, // Per account limit
+			RPS:     1.0,                     // Allow setup, actual limit is concurrent connections
+			Burst:   80,                      // Max 80 concurrent connections per account
+		},
+	}
+}
+
 // GetConfigFields returns the configuration fields needed by this plugin
 func (p *WooXPlugin) GetConfigFields() []dt.ConfigField {
 	// Initialize client if needed to get config fields
@@ -95,10 +133,10 @@ func (p *WooXPlugin) OnShutdown() error {
 
 // RegisterCommands registers all command handlers
 func (p *WooXPlugin) RegisterCommands(router *datasrc.CommandRouter) {
-	router.Register("getMarkets", p.handleGetMarkets)
-	router.Register("getTimeframes", p.handleGetTimeframes)
-	router.Register("ohlcvStream", p.handleOHLCVStream)
-	router.Register("getOHLCV", p.handleGetOHLCV) // Historical OHLCV
+	router.Register(cex.CEX_CMD_GET_MARKETS, p.handleGetMarkets)
+	router.Register(cex.CEX_CMD_GET_TIMEFRAMES, p.handleGetTimeframes)
+	router.Register(cex.CEX_CMD_OHLCV_STREAM, p.handleOHLCVStream)
+	router.Register(cex.CEX_CMD_GET_OHLCV, p.handleGetOHLCV) // Historical OHLCV
 }
 
 // ============================================================================
