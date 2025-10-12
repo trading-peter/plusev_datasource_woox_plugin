@@ -136,7 +136,7 @@ func (p *WooXPlugin) RegisterCommands(router *datasrc.CommandRouter) {
 	router.Register(cex.CEX_CMD_GET_MARKETS, p.handleGetMarkets)
 	router.Register(cex.CEX_CMD_GET_TIMEFRAMES, p.handleGetTimeframes)
 	router.Register(cex.CEX_CMD_OHLCV_STREAM, p.handleOHLCVStream)
-	router.Register(cex.CEX_CMD_GET_OHLCV, p.handleGetOHLCV) // Historical OHLCV
+	router.Register(cex.CEX_CMD_GET_OHLCV, p.handleGetOHLCV)
 }
 
 // ============================================================================
@@ -161,41 +161,26 @@ func (p *WooXPlugin) handleGetTimeframes(params map[string]any) dt.Response {
 
 // handleGetOHLCV returns historical OHLCV data
 func (p *WooXPlugin) handleGetOHLCV(params map[string]any) dt.Response {
-	// Extract parameters
-	symbol, _ := params["symbol"].(string)
-	timeframe, _ := params["timeframe"].(string)
+	// Extract validated parameters - validation already done by terminal
+	ohlcvParams := cex.GetOHLCVParamsFromMap(params)
 
-	// Optional parameters
-	var startTime, endTime int64
-	var limit int
-
-	if st, ok := params["startTime"].(float64); ok {
-		startTime = int64(st)
-	}
-	if et, ok := params["endTime"].(float64); ok {
-		endTime = int64(et)
-	}
-	if l, ok := params["limit"].(float64); ok {
-		limit = int(l)
+	// Convert to client's OHLCVParams format
+	clientParams := dt.OHLCVParams{
+		Symbol:    ohlcvParams.Symbol,
+		Timeframe: ohlcvParams.Timeframe,
+		Limit:     ohlcvParams.Limit,
 	}
 
-	if symbol == "" {
-		return datasrc.ErrorResponseMsg("symbol parameter is required")
+	// Convert time.Time to unix milliseconds if provided
+	if ohlcvParams.StartTime != nil {
+		clientParams.StartTime = ohlcvParams.StartTime.UnixMilli()
 	}
-	if timeframe == "" {
-		timeframe = "1m" // Default
+	if ohlcvParams.EndTime != nil {
+		clientParams.EndTime = ohlcvParams.EndTime.UnixMilli()
 	}
 
 	// Fetch OHLCV data
-	ohlcvParams := dt.OHLCVParams{
-		Symbol:    symbol,
-		Timeframe: timeframe,
-		StartTime: startTime,
-		EndTime:   endTime,
-		Limit:     limit,
-	}
-
-	records, err := p.client.GetOHLCV(ohlcvParams)
+	records, err := p.client.GetOHLCV(clientParams)
 	if err != nil {
 		return datasrc.ErrorResponse(err)
 	}
@@ -205,24 +190,16 @@ func (p *WooXPlugin) handleGetOHLCV(params map[string]any) dt.Response {
 
 // handleOHLCVStream sets up a WebSocket stream for OHLCV data
 func (p *WooXPlugin) handleOHLCVStream(params map[string]any) dt.Response {
-	// Extract parameters
-	symbol, ok := params["symbol"].(string)
-	if !ok || symbol == "" {
-		return datasrc.ErrorResponseMsg("symbol parameter is required")
-	}
-
-	interval, ok := params["interval"].(string)
-	if !ok || interval == "" {
-		interval = "1m" // Default
-	}
+	// Extract validated parameters - validation already done by terminal
+	streamParams := cex.OHLCVStreamParamsFromMap(params)
 
 	// Prepare stream setup request
 	streamReq := dt.StreamSetupRequest{
-		StreamID:   fmt.Sprintf("woox_ohlcv_%s_%s", symbol, interval),
+		StreamID:   fmt.Sprintf("woox_ohlcv_%s_%s", streamParams.Symbol, streamParams.Interval),
 		StreamType: "ohlcv",
 		Parameters: map[string]any{
-			"symbol":   symbol,
-			"interval": interval,
+			"symbol":   streamParams.Symbol,
+			"interval": streamParams.Interval,
 			"private":  false, // Public stream for OHLCV
 		},
 	}
