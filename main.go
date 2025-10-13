@@ -195,12 +195,12 @@ func (p *WooXPlugin) handleOHLCVStream(params map[string]any) dt.Response {
 
 	// Prepare stream setup request
 	streamReq := dt.StreamSetupRequest{
-		StreamID:   fmt.Sprintf("woox_ohlcv_%s_%s", streamParams.Symbol, streamParams.Interval),
+		StreamID:   fmt.Sprintf("woox_ohlcv_%s_%s", streamParams.Symbol, streamParams.Timeframe),
 		StreamType: "ohlcv",
 		Parameters: map[string]any{
-			"symbol":   streamParams.Symbol,
-			"interval": streamParams.Interval,
-			"private":  false, // Public stream for OHLCV
+			"symbol":    streamParams.Symbol,
+			"timeframe": streamParams.Timeframe,
+			"private":   false, // Public stream for OHLCV
 		},
 	}
 

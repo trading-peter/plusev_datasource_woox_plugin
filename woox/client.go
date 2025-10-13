@@ -334,17 +334,17 @@ func (c *Client) GetMarkets() ([]dt.Market, error) {
 func (c *Client) GetTimeframes() []dt.Timeframe {
 	// WooX supported timeframes according to API docs: 1m/5m/15m/30m/1h/4h/12h/1d/1w/1mon/1y
 	return []dt.Timeframe{
-		{Label: "1 Minute", Value: "1m", Interval: 60},
-		{Label: "5 Minutes", Value: "5m", Interval: 300},
-		{Label: "15 Minutes", Value: "15m", Interval: 900},
-		{Label: "30 Minutes", Value: "30m", Interval: 1800},
-		{Label: "1 Hour", Value: "1h", Interval: 3600},
-		{Label: "4 Hours", Value: "4h", Interval: 14400},
-		{Label: "12 Hours", Value: "12h", Interval: 43200},
-		{Label: "1 Day", Value: "1d", Interval: 86400},
-		{Label: "1 Week", Value: "1w", Interval: 604800},
-		{Label: "1 Month", Value: "1mon", Interval: 2592000}, // Approximate
-		{Label: "1 Year", Value: "1y", Interval: 31536000},   // Approximate
+		{Value: 1, Unit: dt.Minutes},
+		{Value: 5, Unit: dt.Minutes},
+		{Value: 15, Unit: dt.Minutes},
+		{Value: 30, Unit: dt.Minutes},
+		{Value: 1, Unit: dt.Hours},
+		{Value: 4, Unit: dt.Hours},
+		{Value: 12, Unit: dt.Hours},
+		{Value: 1, Unit: dt.Days},
+		{Value: 1, Unit: dt.Weeks},
+		{Value: 1, Unit: dt.Months},
+		{Value: 1, Unit: dt.Years},
 	}
 }
 
@@ -426,7 +426,7 @@ func (c *Client) GetOHLCV(params dt.OHLCVParams) ([]dt.OHLCVRecord, error) {
 func (c *Client) PrepareStream(request dt.StreamSetupRequest) (dt.StreamSetupResponse, error) {
 	// Extract parameters
 	symbol, _ := request.Parameters["symbol"].(string)
-	interval, _ := request.Parameters["interval"].(string)
+	timeframe, _ := request.Parameters["timeframe"].(string)
 	usePrivate, _ := request.Parameters["private"].(bool)
 
 	if symbol == "" {
@@ -436,11 +436,21 @@ func (c *Client) PrepareStream(request dt.StreamSetupRequest) (dt.StreamSetupRes
 		}, nil
 	}
 
-	// Convert interval (timeframe) to WooX kline format
-	// According to WooX docs, valid values are: 1m/5m/15m/30m/1h/4h/12h/1d/1w/1mon/1y
-	timeframe := "1m" // default
-	if interval != "" {
-		timeframe = interval
+	supportedTf := c.GetTimeframes()
+
+	found := false
+	for _, tf := range supportedTf {
+		if tf.String() == timeframe {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return dt.StreamSetupResponse{
+			Success: false,
+			Error:   fmt.Sprintf("unsupported timeframe: %s", timeframe),
+		}, nil
 	}
 
 	// Determine WebSocket URL based on environment and authentication
