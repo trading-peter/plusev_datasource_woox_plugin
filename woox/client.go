@@ -101,13 +101,6 @@ type WSSubscribeMessage struct {
 	Topic string `json:"topic"` // Format: {symbol}@kline_{time}
 }
 
-// Legacy V3 subscription (deprecated)
-type WSSubscribeMessageV3 struct {
-	ID     string   `json:"id"`
-	Cmd    string   `json:"cmd"`
-	Params []string `json:"params"`
-}
-
 type WSResponse struct {
 	ID      string `json:"id"`
 	Event   string `json:"event"`
@@ -424,6 +417,10 @@ func (c *Client) GetOHLCV(params dt.OHLCVParams) ([]dt.OHLCVRecord, error) {
 
 // PrepareStream prepares streaming connection setup
 func (c *Client) PrepareStream(request dt.StreamSetupRequest) (dt.StreamSetupResponse, error) {
+	c.log.InfoWithData("PrepareStream", map[string]any{
+		"streamRequest": request,
+	})
+
 	// Extract parameters
 	symbol, _ := request.Parameters["symbol"].(string)
 	timeframe, _ := request.Parameters["timeframe"].(string)
@@ -556,6 +553,36 @@ func (c *Client) HandleStreamMessage(request dt.StreamMessageRequest) (dt.Stream
 	if err := json.Unmarshal([]byte(request.Message), &klineUpdate); err == nil {
 		// Topic format: {symbol}@kline_{time}, e.g., "SPOT_BTC_USDT@kline_1m"
 		if strings.Contains(klineUpdate.Topic, "@kline_") {
+			// Extract symbol and timeframe from streamID
+			// StreamID format: "woox_ohlcv_{symbol}_{timeframe}"
+			// e.g., "woox_ohlcv_SPOT_BTC_USDT_1m"
+			streamIDParts := strings.Split(request.StreamID, "_")
+			if len(streamIDParts) < 4 {
+				// Invalid streamID format - ignore message
+				return dt.StreamMessageResponse{
+					Success: true,
+					Action:  "ignore",
+				}, nil
+			}
+
+			// Reconstruct symbol and timeframe from streamID
+			// Symbol is everything between "woox_ohlcv_" and the last underscore
+			// Timeframe is the last part
+			timeframe := streamIDParts[len(streamIDParts)-1]
+			symbol := strings.Join(streamIDParts[2:len(streamIDParts)-1], "_")
+
+			// Build expected topic for this stream
+			expectedTopic := fmt.Sprintf("%s@kline_%s", symbol, timeframe)
+
+			// Only process messages that match this stream's symbol and timeframe
+			if klineUpdate.Topic != expectedTopic {
+				// This message is for a different stream - ignore it
+				return dt.StreamMessageResponse{
+					Success: true,
+					Action:  "ignore",
+				}, nil
+			}
+
 			// Convert to OHLCV record
 			record, err := c.convertKlineToOHLCV(klineUpdate)
 			if err != nil {

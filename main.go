@@ -6,6 +6,7 @@ import (
 	"github.com/plusev-terminal/go-plugin-common/datasrc"
 	cex "github.com/plusev-terminal/go-plugin-common/datasrc/cex"
 	dt "github.com/plusev-terminal/go-plugin-common/datasrc/types"
+	"github.com/plusev-terminal/go-plugin-common/logging"
 	m "github.com/plusev-terminal/go-plugin-common/meta"
 	"github.com/plusev-terminal/go-plugin-common/requester"
 
@@ -190,6 +191,8 @@ func (p *WooXPlugin) handleGetOHLCV(params map[string]any) dt.Response {
 
 // handleOHLCVStream sets up a WebSocket stream for OHLCV data
 func (p *WooXPlugin) handleOHLCVStream(params map[string]any) dt.Response {
+	logging.NewLogger("woox-datasource").InfoWithData("handleOHLCVStream", params)
+
 	// Extract validated parameters - validation already done by terminal
 	streamParams := cex.OHLCVStreamParamsFromMap(params)
 
