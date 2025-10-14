@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/plusev-terminal/go-plugin-common/datasrc"
 	cex "github.com/plusev-terminal/go-plugin-common/datasrc/cex"
@@ -32,7 +33,7 @@ func (p *WooXPlugin) GetMeta() m.Meta {
 		Category:    "cex",
 		Description: "WooX Exchange data source - spot and futures markets",
 		Author:      "PlusEV Team",
-		Version:     "3.0.0",
+		Version:     "3.1.1",
 		Repository:  "https://github.com/trading-peter/plusev_datasource_woox_plugin",
 		Tags:        []string{"woox", "crypto", "exchange", "spot", "futures"},
 		Contacts: []m.AuthorContact{
@@ -151,13 +152,13 @@ func (p *WooXPlugin) handleGetMarkets(params map[string]any) dt.Response {
 		return datasrc.ErrorResponse(err)
 	}
 
-	return datasrc.SuccessResponse(markets)
+	return datasrc.SuccessResponse(markets, time.Hour*12)
 }
 
 // handleGetTimeframes returns supported timeframes
 func (p *WooXPlugin) handleGetTimeframes(params map[string]any) dt.Response {
 	timeframes := p.client.GetTimeframes()
-	return datasrc.SuccessResponse(timeframes)
+	return datasrc.SuccessResponse(timeframes, time.Hour*12)
 }
 
 // handleGetOHLCV returns historical OHLCV data
