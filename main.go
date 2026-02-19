@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	ex "github.com/plusev-terminal/go-plugin-common/datasrc/exchange"
+	acct "github.com/plusev-terminal/go-plugin-common/datasrc/exchange/account"
 	"github.com/plusev-terminal/go-plugin-common/logging"
 	m "github.com/plusev-terminal/go-plugin-common/meta"
 	"github.com/plusev-terminal/go-plugin-common/plugin"
@@ -162,6 +164,9 @@ func (p *WooXPlugin) RegisterCommands(router *plugin.CommandRouter) {
 	router.Register(ex.CMD_GET_TIMEFRAMES, p.handleGetTimeframes)
 	router.Register(ex.CMD_OHLCV_STREAM, p.handleOHLCVStream)
 	router.Register(ex.CMD_GET_OHLCV, p.handleGetOHLCV)
+	router.Register(ex.CMD_GET_BALANCES, p.handleGetBalances)
+	router.Register(ex.CMD_GET_POSITIONS, p.handleGetPositions)
+	router.Register(ex.CMD_GET_ORDERS, p.handleGetOrders)
 }
 
 // ============================================================================
@@ -196,6 +201,318 @@ func (p *WooXPlugin) handleGetOHLCV(params map[string]any) plugin.Response {
 	}
 
 	return plugin.SuccessResponse(records)
+}
+
+func normalizeWooXSide(side string) acct.OrderSide {
+	s := strings.ToUpper(strings.TrimSpace(side))
+	switch s {
+	case "BUY", "BID", "LONG":
+		return acct.OrderSideBuy
+	case "SELL", "ASK", "SHORT":
+		return acct.OrderSideSell
+	case "":
+		return acct.OrderSideUnknown
+	default:
+		return acct.OrderSide(strings.ToLower(s))
+	}
+}
+
+func normalizeWooXStatus(status string) acct.OrderStatus {
+	s := strings.ToUpper(strings.TrimSpace(status))
+	s = strings.ReplaceAll(s, " ", "_")
+	s = strings.ReplaceAll(s, "-", "_")
+	switch s {
+	case "NEW":
+		return acct.OrderStatusNew
+	case "PARTIAL_FILLED", "PARTIALLY_FILLED":
+		return acct.OrderStatusPartiallyFilled
+	case "FILLED":
+		return acct.OrderStatusFilled
+	case "CANCELED", "CANCELLED":
+		return acct.OrderStatusCanceled
+	case "REJECTED":
+		return acct.OrderStatusRejected
+	case "EXPIRED":
+		return acct.OrderStatusExpired
+	case "INCOMPLETE":
+		return acct.OrderStatusIncomplete
+	case "COMPLETED":
+		return acct.OrderStatusCompleted
+	case "":
+		return acct.OrderStatusUnknown
+	default:
+		return acct.OrderStatus(strings.ToLower(s))
+	}
+}
+
+func normalizeWooXType(orderType string) (acct.OrderType, acct.TimeInForce, bool) {
+	s := strings.ToUpper(strings.TrimSpace(orderType))
+	s = strings.ReplaceAll(s, " ", "_")
+	s = strings.ReplaceAll(s, "-", "_")
+	switch s {
+	case "LIMIT":
+		return acct.OrderTypeLimit, acct.TimeInForceUnknown, false
+	case "MARKET":
+		return acct.OrderTypeMarket, acct.TimeInForceUnknown, false
+	case "IOC":
+		return acct.OrderTypeLimit, acct.TimeInForceIOC, false
+	case "FOK":
+		return acct.OrderTypeLimit, acct.TimeInForceFOK, false
+	case "POST_ONLY":
+		return acct.OrderTypeLimit, acct.TimeInForcePostOnly, true
+	case "ASK", "BID":
+		return acct.OrderTypeLimit, acct.TimeInForceUnknown, false
+	case "STOP", "STOP_LOSS":
+		return acct.OrderTypeStop, acct.TimeInForceUnknown, false
+	case "STOP_LIMIT":
+		return acct.OrderTypeStopLimit, acct.TimeInForceUnknown, false
+	case "STOP_MARKET":
+		return acct.OrderTypeStopMarket, acct.TimeInForceUnknown, false
+	case "TAKE_PROFIT", "TP":
+		return acct.OrderTypeTakeProfit, acct.TimeInForceUnknown, false
+	case "TAKE_PROFIT_LIMIT":
+		return acct.OrderTypeTakeProfitLimit, acct.TimeInForceUnknown, false
+	case "TAKE_PROFIT_MARKET":
+		return acct.OrderTypeTakeProfitMarket, acct.TimeInForceUnknown, false
+	case "TRAILING_STOP":
+		return acct.OrderTypeTrailingStop, acct.TimeInForceUnknown, false
+	case "":
+		return acct.OrderTypeUnknown, acct.TimeInForceUnknown, false
+	default:
+		return acct.OrderType(strings.ToLower(s)), acct.TimeInForceUnknown, false
+	}
+}
+
+func (p *WooXPlugin) handleGetBalances(params map[string]any) plugin.Response {
+	if p.client == nil {
+		return plugin.ErrorResponseMsg("client not initialized")
+	}
+	_ = ex.GetBalancesParamsFromMap(params)
+
+	balances, err := p.client.GetBalances()
+	if err != nil {
+		return plugin.ErrorResponse(err)
+	}
+
+	resp := acct.BalancesResponse{
+		FetchedAt: time.Now(),
+		Scopes:    map[acct.ScopeType]acct.BalanceScope{},
+		Extra:     map[string]any{},
+	}
+
+	scope := acct.BalanceScope{
+		Balances: map[string]acct.AssetBalance{},
+		Extra:    map[string]any{},
+	}
+
+	for _, b := range balances {
+		asset := strings.ToUpper(strings.TrimSpace(b.Token))
+		if asset == "" {
+			continue
+		}
+
+		available := b.Holding
+		if b.Holding != "" && b.Frozen != "" {
+			if h, err := strconv.ParseFloat(b.Holding, 64); err == nil {
+				if f, err := strconv.ParseFloat(b.Frozen, 64); err == nil {
+					available = fmt.Sprintf("%.15g", h-f)
+				}
+			}
+		}
+
+		bal := acct.AssetBalance{
+			Asset:            asset,
+			Total:            b.Holding,
+			AvailableToTrade: available,
+			Components:       map[string]string{},
+			Extra:            map[string]any{},
+		}
+		if b.Frozen != "" {
+			bal.Components["frozen"] = b.Frozen
+		}
+		if b.Pending != "" {
+			bal.Components["pending"] = b.Pending
+		}
+		if b.Interest != "" {
+			bal.Components["interest"] = b.Interest
+		}
+		if b.Staked != "" {
+			bal.Components["staked"] = b.Staked
+		}
+
+		scope.Balances[asset] = bal
+	}
+
+	resp.Scopes[acct.ScopeUnified] = scope
+
+	return plugin.SuccessResponse(resp, time.Second*3)
+}
+
+func (p *WooXPlugin) handleGetPositions(params map[string]any) plugin.Response {
+	if p.client == nil {
+		return plugin.ErrorResponseMsg("client not initialized")
+	}
+	_ = ex.GetPositionsParamsFromMap(params)
+
+	rows, err := p.client.GetPositions()
+	if err != nil {
+		return plugin.ErrorResponse(err)
+	}
+
+	positions := make([]acct.Position, 0, len(rows))
+	for _, row := range rows {
+		qty := strings.TrimSpace(row.PositionSize)
+		if qty == "" {
+			qty = strings.TrimSpace(row.Size)
+		}
+		if qty == "" {
+			qty = strings.TrimSpace(row.Quantity)
+		}
+
+		side := strings.TrimSpace(row.PositionSide)
+		if side == "" {
+			side = strings.TrimSpace(row.Side)
+		}
+		if qty != "" {
+			if f, err := strconv.ParseFloat(qty, 64); err == nil {
+				if f < 0 {
+					qty = fmt.Sprintf("%.15g", -f)
+					if side == "" {
+						side = "SHORT"
+					}
+				} else if f > 0 && side == "" {
+					side = "LONG"
+				}
+			}
+		}
+
+		entry := strings.TrimSpace(row.EntryPrice)
+		if entry == "" {
+			entry = strings.TrimSpace(row.AvgEntryPrice)
+		}
+		unrealized := strings.TrimSpace(row.UnrealizedPnL)
+		if unrealized == "" {
+			unrealized = strings.TrimSpace(row.PnL)
+		}
+
+		pos := acct.Position{
+			Symbol:           row.Symbol,
+			Side:             strings.ToLower(side),
+			Quantity:         qty,
+			EntryPrice:       entry,
+			MarkPrice:        row.MarkPrice,
+			UnrealizedPnL:    unrealized,
+			LiquidationPrice: row.LiquidationPrice,
+			Leverage:         row.Leverage,
+			IsIsolated:       row.IsIsolated || strings.EqualFold(row.MarginType, "isolated"),
+			Components: map[string]string{
+				"position_value":  row.PositionValue,
+				"margin_type":     row.MarginType,
+				"isolated_margin": row.IsolatedMargin,
+			},
+			Extra: map[string]any{},
+		}
+
+		if pos.Symbol == "" || pos.Quantity == "" {
+			continue
+		}
+		positions = append(positions, pos)
+	}
+
+	resp := acct.PositionsResponse{
+		FetchedAt: time.Now(),
+		Scopes: map[acct.ScopeType]acct.PositionScope{
+			acct.ScopeFutures: {
+				Positions: positions,
+				Extra:     map[string]any{},
+			},
+		},
+		Extra: map[string]any{},
+	}
+
+	return plugin.SuccessResponse(resp, time.Second*3)
+}
+
+func (p *WooXPlugin) handleGetOrders(params map[string]any) plugin.Response {
+	if p.client == nil {
+		return plugin.ErrorResponseMsg("client not initialized")
+	}
+	parsed := ex.GetOrdersParamsFromMap(params)
+
+	status := ""
+	if parsed.OpenOnly {
+		status = "INCOMPLETE"
+	}
+
+	rows, err := p.client.GetOrders("", status, 0)
+	if err != nil {
+		return plugin.ErrorResponse(err)
+	}
+
+	orders := make([]acct.Order, 0, len(rows))
+	for _, o := range rows {
+		status := normalizeWooXStatus(o.OrderStatus)
+		if parsed.OpenOnly && status != acct.OrderStatusNew && status != acct.OrderStatusPartiallyFilled {
+			continue
+		}
+
+		orderType, tif, postOnly := normalizeWooXType(o.OrderType)
+		remaining := ""
+		if o.Quantity != "" && o.TotalExecutedQuantity != "" {
+			if q, err := strconv.ParseFloat(o.Quantity, 64); err == nil {
+				if exq, err := strconv.ParseFloat(o.TotalExecutedQuantity, 64); err == nil {
+					remaining = fmt.Sprintf("%.15g", q-exq)
+				}
+			}
+		}
+
+		order := acct.Order{
+			OrderID:           fmt.Sprintf("%d", o.OrderID),
+			ClientOrderID:     o.ClientID,
+			Symbol:            o.Symbol,
+			Side:              normalizeWooXSide(o.Side),
+			Type:              orderType,
+			Status:            status,
+			Price:             o.Price,
+			Quantity:          o.Quantity,
+			ExecutedQuantity:  o.TotalExecutedQuantity,
+			RemainingQuantity: remaining,
+			TimeInForce:       tif,
+			ReduceOnly:        o.ReduceOnly,
+			PostOnly:          postOnly,
+			Components: map[string]string{
+				"amount":         o.Amount,
+				"trigger_price":  o.TriggerPrice,
+				"total_fee":      o.TotalFee,
+				"total_rebate":   o.TotalRebate,
+				"fee_asset":      o.FeeAsset,
+				"rebate_asset":   o.RebateAsset,
+				"order_tag":      o.OrderTag,
+				"raw_order_type": o.OrderType,
+			},
+			Extra: map[string]any{},
+		}
+		if o.CreatedTime > 0 {
+			order.CreatedAt = time.UnixMilli(o.CreatedTime)
+		}
+		if o.UpdatedTime > 0 {
+			order.UpdatedAt = time.UnixMilli(o.UpdatedTime)
+		}
+		orders = append(orders, order)
+	}
+
+	resp := acct.OrdersResponse{
+		FetchedAt: time.Now(),
+		Scopes: map[acct.ScopeType]acct.OrderScope{
+			acct.ScopeUnified: {
+				Orders: orders,
+				Extra:  map[string]any{},
+			},
+		},
+		Extra: map[string]any{},
+	}
+
+	return plugin.SuccessResponse(resp, time.Second*3)
 }
 
 // handleOHLCVStream sets up a WebSocket stream for OHLCV data

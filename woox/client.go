@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -180,6 +181,34 @@ type BalanceResponse struct {
 	Timestamp int64 `json:"timestamp"`
 	Data      struct {
 		Holding []Balance `json:"holding"`
+	} `json:"data"`
+}
+
+type PositionRow struct {
+	Symbol           string `json:"symbol"`
+	PositionSide     string `json:"position_side"`
+	Side             string `json:"side"`
+	PositionSize     string `json:"position_size"`
+	Size             string `json:"size"`
+	Quantity         string `json:"quantity"`
+	EntryPrice       string `json:"entry_price"`
+	AvgEntryPrice    string `json:"average_entry_price"`
+	MarkPrice        string `json:"mark_price"`
+	UnrealizedPnL    string `json:"unrealized_pnl"`
+	PnL              string `json:"pnl"`
+	LiquidationPrice string `json:"liquidation_price"`
+	Leverage         int    `json:"leverage"`
+	MarginType       string `json:"margin_type"`
+	IsIsolated       bool   `json:"is_isolated"`
+	IsolatedMargin   string `json:"isolated_margin"`
+	PositionValue    string `json:"position_value"`
+}
+
+type PositionsResponse struct {
+	Success   bool  `json:"success"`
+	Timestamp int64 `json:"timestamp"`
+	Data      struct {
+		Rows []PositionRow `json:"rows"`
 	} `json:"data"`
 }
 
@@ -542,6 +571,7 @@ func (c *Client) GetOHLCV(params exchange.GetOHLCVParams) ([]tt.OHLCVRecord, err
 			Low:      fmt.Sprintf("%.8f", kline.Low),
 			Close:    fmt.Sprintf("%.8f", kline.Close),
 			Volume:   fmt.Sprintf("%.8f", kline.Volume),
+			IsClosed: true,
 		})
 	}
 
@@ -775,6 +805,8 @@ func (c *Client) HandleConnectionEvent(event plugin.StreamConnectionEvent) (plug
 // convertKlineToOHLCV converts WooX kline data to OHLCV record
 func (c *Client) convertKlineToOHLCV(update WSKlineUpdate) (tt.OHLCVRecord, error) {
 	// WooX returns numeric values as float64, convert to strings for arbitrary precision
+	// IsClosed is always false for live updates - WooX doesn't provide this info,
+	// consumers should use OHLCVDebouncer to detect closed candles
 	return tt.OHLCVRecord{
 		OpenTime: update.Data.StartTime / 1000, // Convert from milliseconds to seconds
 		Open:     fmt.Sprintf("%.8f", update.Data.Open),
@@ -782,6 +814,7 @@ func (c *Client) convertKlineToOHLCV(update WSKlineUpdate) (tt.OHLCVRecord, erro
 		Low:      fmt.Sprintf("%.8f", update.Data.Low),
 		Close:    fmt.Sprintf("%.8f", update.Data.Close),
 		Volume:   fmt.Sprintf("%.8f", update.Data.Volume),
+		IsClosed: false,
 	}, nil
 }
 
@@ -790,6 +823,13 @@ func (c *Client) generateWooXSignature(timestamp string, method, path, body stri
 	// Create the string to sign: timestamp + method + path + body
 	message := timestamp + method + path + body
 
+	h := hmac.New(sha256.New, []byte(c.apiSecret))
+	h.Write([]byte(message))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (c *Client) generateWooXV1Signature(timestamp, params string) string {
+	message := params + "|" + timestamp
 	h := hmac.New(sha256.New, []byte(c.apiSecret))
 	h.Write([]byte(message))
 	return hex.EncodeToString(h.Sum(nil))
@@ -810,6 +850,24 @@ func (c *Client) addAuthHeaders(req *rt.Request, body string) {
 	}
 
 	signature := c.generateWooXSignature(timestamp, req.Method, path, body)
+
+	if req.Headers == nil {
+		req.Headers = make(map[string]string)
+	}
+
+	req.Headers["x-api-key"] = c.apiKey
+	req.Headers["x-api-timestamp"] = timestamp
+	req.Headers["x-api-signature"] = signature
+	req.Headers["Content-Type"] = "application/json"
+}
+
+func (c *Client) addAuthHeadersV1(req *rt.Request, params string) {
+	if c.apiKey == "" || c.apiSecret == "" {
+		return
+	}
+
+	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	signature := c.generateWooXV1Signature(timestamp, params)
 
 	if req.Headers == nil {
 		req.Headers = make(map[string]string)
@@ -896,7 +954,7 @@ func (c *Client) GetBalances() ([]Balance, error) {
 
 	req := &rt.Request{
 		Method: "GET",
-		URL:    c.baseURL + "/v3/private/client/holding",
+		URL:    c.baseURL + "/v3/balances",
 		Headers: map[string]string{
 			"Content-Type": "application/json",
 		},
@@ -963,26 +1021,21 @@ func (c *Client) GetOrders(symbol string, status string, limit int) ([]Order, er
 		return nil, fmt.Errorf("authentication required for order history")
 	}
 
-	queryParams := ""
+	q := url.Values{}
 	if symbol != "" {
-		queryParams += "symbol=" + symbol
+		q.Set("symbol", symbol)
 	}
 	if status != "" {
-		if queryParams != "" {
-			queryParams += "&"
-		}
-		queryParams += "status=" + status
+		q.Set("status", status)
 	}
 	if limit > 0 {
-		if queryParams != "" {
-			queryParams += "&"
-		}
-		queryParams += fmt.Sprintf("size=%d", limit)
+		q.Set("size", strconv.Itoa(limit))
 	}
+	sortedParams := q.Encode()
 
-	url := c.baseURL + "/v3/private/orders"
-	if queryParams != "" {
-		url += "?" + queryParams
+	url := c.baseURL + "/v1/orders"
+	if sortedParams != "" {
+		url += "?" + sortedParams
 	}
 
 	req := &rt.Request{
@@ -993,7 +1046,7 @@ func (c *Client) GetOrders(symbol string, status string, limit int) ([]Order, er
 		},
 	}
 
-	c.addAuthHeaders(req, "")
+	c.addAuthHeadersV1(req, sortedParams)
 
 	var response OrderResponse
 	_, err := c.requester.Send(req, &response)
@@ -1003,6 +1056,34 @@ func (c *Client) GetOrders(symbol string, status string, limit int) ([]Order, er
 
 	if !response.Success {
 		return nil, fmt.Errorf("WooX API returned success=false for orders")
+	}
+
+	return response.Data.Rows, nil
+}
+
+func (c *Client) GetPositions() ([]PositionRow, error) {
+	if !c.isAuthenticated() {
+		return nil, fmt.Errorf("authentication required for positions")
+	}
+
+	req := &rt.Request{
+		Method: "GET",
+		URL:    c.baseURL + "/v3/positions",
+		Headers: map[string]string{
+			"Content-Type": "application/json",
+		},
+	}
+
+	c.addAuthHeaders(req, "")
+
+	var response PositionsResponse
+	_, err := c.requester.Send(req, &response)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch positions: %w", err)
+	}
+
+	if !response.Success {
+		return nil, fmt.Errorf("WooX API returned success=false for positions")
 	}
 
 	return response.Data.Rows, nil
