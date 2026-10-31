@@ -11,13 +11,13 @@ import (
 	"strings"
 	"time"
 
-	ex "github.com/plusev-terminal/go-plugin-common/datasrc/exchange"
-	"github.com/plusev-terminal/go-plugin-common/logging"
+	ex "github.com/plusev-terminal/go-plugin-common/v2/datasrc/exchange"
+	"github.com/plusev-terminal/go-plugin-common/v2/logging"
 
-	"github.com/plusev-terminal/go-plugin-common/plugin"
-	rt "github.com/plusev-terminal/go-plugin-common/requester/types"
-	tt "github.com/plusev-terminal/go-plugin-common/trading"
-	"github.com/plusev-terminal/go-plugin-common/wasmutils"
+	"github.com/plusev-terminal/go-plugin-common/v2/plugin"
+	rt "github.com/plusev-terminal/go-plugin-common/v2/requester/types"
+	tt "github.com/plusev-terminal/go-plugin-common/v2/trading"
+	"github.com/plusev-terminal/go-plugin-common/v2/wasmutils"
 )
 
 // Client represents a client for the WooX v3 API
@@ -337,13 +337,13 @@ func (c *Client) GetMarkets() ([]tt.Market, error) {
 
 		// Determine asset type based on symbol format
 		// WooX symbols: SPOT symbols like "BTC_USDT", PERP symbols like "PERP_BTC_USDT"
-		assetType := "spot"
+		var assetType tt.AssetType = tt.AssetTypeSpot
 		if strings.HasPrefix(instrument.Symbol, "PERP_") {
-			assetType = "perpetual"
+			assetType = tt.AssetTypePerpetual
 		}
 
 		market := tt.Market{
-			Label:     c.formatMarketLabel(instrument.Symbol, assetType),
+			Label:     c.formatMarketLabel(instrument.Symbol, string(assetType)),
 			Symbol:    instrument.Symbol,
 			Base:      instrument.BaseAsset,
 			Quote:     instrument.QuoteAsset,
@@ -1229,10 +1229,10 @@ func (c *Client) GetTradeHistory(params ex.GetTradeHistoryParams) (*tt.Paginated
 			orderType = "maker"
 		}
 
-		assetType := "spot"
+		var assetType tt.AssetType = tt.AssetTypeSpot
 		isPerp := strings.HasPrefix(t.Symbol, "PERP_")
 		if isPerp {
-			assetType = "perpetual"
+			assetType = tt.AssetTypePerpetual
 		}
 
 		symbol := base + "/" + quote
@@ -1254,7 +1254,7 @@ func (c *Client) GetTradeHistory(params ex.GetTradeHistoryParams) (*tt.Paginated
 			Fee:          strconv.FormatFloat(t.Fee, 'f', -1, 64),
 			FeeCurrency:  t.FeeAsset,
 			OrderType:    orderType,
-			AssetType:    assetType,
+			AssetType:    string(assetType),
 			IsDerivative: isPerp,
 		})
 
@@ -1552,10 +1552,10 @@ func (c *Client) GetOrderHistory(params ex.GetOrderHistoryParams) (*tt.Paginated
 
 		tsMs := parseWooXTimestamp(o.CreatedTime)
 
-		assetType := "spot"
+		var assetType tt.AssetType = tt.AssetTypeSpot
 		isPerp := strings.HasPrefix(o.Symbol, "PERP_")
 		if isPerp {
-			assetType = "perpetual"
+			assetType = tt.AssetTypePerpetual
 		}
 
 		symbol := base + "/" + quote
@@ -1576,7 +1576,7 @@ func (c *Client) GetOrderHistory(params ex.GetOrderHistoryParams) (*tt.Paginated
 			Amount:       strconv.FormatFloat(o.TotalExecutedQuantity, 'f', -1, 64),
 			Fee:          strconv.FormatFloat(o.TotalFee, 'f', -1, 64),
 			FeeCurrency:  o.FeeAsset,
-			AssetType:    assetType,
+			AssetType:    string(assetType),
 			IsDerivative: isPerp,
 		})
 	}

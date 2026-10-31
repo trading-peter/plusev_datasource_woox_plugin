@@ -7,7 +7,7 @@ package wooxlimits
 import (
 	"time"
 
-	m "github.com/plusev-terminal/go-plugin-common/meta"
+	m "github.com/plusev-terminal/go-plugin-common/v2/meta"
 )
 
 // Sources (retrieved 2026-10-31):

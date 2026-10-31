@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	m "github.com/plusev-terminal/go-plugin-common/meta"
+	m "github.com/plusev-terminal/go-plugin-common/v2/meta"
 )
 
 // TestWooXManifestRateLimits pins the manifest rate-limit declarations to the

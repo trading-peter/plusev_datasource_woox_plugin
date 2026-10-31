@@ -6,13 +6,13 @@ import (
 	"strings"
 	"time"
 
-	ex "github.com/plusev-terminal/go-plugin-common/datasrc/exchange"
-	acct "github.com/plusev-terminal/go-plugin-common/datasrc/exchange/account"
-	"github.com/plusev-terminal/go-plugin-common/logging"
-	m "github.com/plusev-terminal/go-plugin-common/meta"
-	"github.com/plusev-terminal/go-plugin-common/plugin"
-	"github.com/plusev-terminal/go-plugin-common/requester"
-	commonstream "github.com/plusev-terminal/go-plugin-common/stream"
+	ex "github.com/plusev-terminal/go-plugin-common/v2/datasrc/exchange"
+	acct "github.com/plusev-terminal/go-plugin-common/v2/datasrc/exchange/account"
+	"github.com/plusev-terminal/go-plugin-common/v2/logging"
+	m "github.com/plusev-terminal/go-plugin-common/v2/meta"
+	"github.com/plusev-terminal/go-plugin-common/v2/plugin"
+	"github.com/plusev-terminal/go-plugin-common/v2/requester"
+	commonstream "github.com/plusev-terminal/go-plugin-common/v2/stream"
 
 	"github.com/trading-peter/plusev_datasource_woox_plugin/woox"
 	"github.com/trading-peter/plusev_datasource_woox_plugin/wooxlimits"
@@ -470,9 +470,9 @@ func (p *WooXPlugin) handleGetOrders(params map[string]any) plugin.Response {
 			TimeInForce:       tif,
 			ReduceOnly:        o.ReduceOnly,
 			PostOnly:          postOnly,
+			TriggerPrice:      o.TriggerPrice,
 			Components: map[string]string{
 				"amount":         o.Amount,
-				"trigger_price":  o.TriggerPrice,
 				"total_fee":      o.TotalFee,
 				"total_rebate":   o.TotalRebate,
 				"fee_asset":      o.FeeAsset,
@@ -480,7 +480,6 @@ func (p *WooXPlugin) handleGetOrders(params map[string]any) plugin.Response {
 				"order_tag":      o.OrderTag,
 				"raw_order_type": o.OrderType,
 			},
-			Extra: map[string]any{},
 		}
 		if o.CreatedTime > 0 {
 			order.CreatedAt = time.UnixMilli(o.CreatedTime)
@@ -560,7 +559,7 @@ func (p *WooXPlugin) handleOHLCVStream(params map[string]any) plugin.Response {
 		return plugin.ErrorResponseMsg("market.symbol is required")
 	}
 
-	assetType := strings.TrimSpace(streamParams.Market.AssetType)
+	assetType := strings.TrimSpace(string(streamParams.Market.AssetType))
 
 	// Prepare stream setup request
 	streamReq := plugin.StreamSetupRequest{

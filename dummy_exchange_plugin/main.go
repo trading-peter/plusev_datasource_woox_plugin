@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"time"
 
-	ex "github.com/plusev-terminal/go-plugin-common/datasrc/exchange"
-	m "github.com/plusev-terminal/go-plugin-common/meta"
-	"github.com/plusev-terminal/go-plugin-common/plugin"
-	tt "github.com/plusev-terminal/go-plugin-common/trading"
+	ex "github.com/plusev-terminal/go-plugin-common/v2/datasrc/exchange"
+	m "github.com/plusev-terminal/go-plugin-common/v2/meta"
+	"github.com/plusev-terminal/go-plugin-common/v2/plugin"
+	tt "github.com/plusev-terminal/go-plugin-common/v2/trading"
 )
 
 // ============================================================================

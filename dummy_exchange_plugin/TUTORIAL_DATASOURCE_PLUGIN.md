@@ -14,7 +14,7 @@ When the terminal loads your plugin, it effectively treats it as a small service
 
 ### Lifecycle / required methods
 
-Your plugin type must implement the `DataSourcePlugin` interface from `github.com/plusev-terminal/go-plugin-common/plugin`. In practice you’ll implement these methods:
+Your plugin type must implement the `DataSourcePlugin` interface from `github.com/plusev-terminal/go-plugin-common/v2/plugin`. In practice you’ll implement these methods:
 
 - `GetMeta() meta.Meta`
 - `GetRateLimits() []plugin.RateLimit`
