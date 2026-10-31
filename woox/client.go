@@ -11,12 +11,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/plusev-terminal/go-plugin-common/datasrc/exchange"
+	ex "github.com/plusev-terminal/go-plugin-common/datasrc/exchange"
 	"github.com/plusev-terminal/go-plugin-common/logging"
 
 	"github.com/plusev-terminal/go-plugin-common/plugin"
 	rt "github.com/plusev-terminal/go-plugin-common/requester/types"
 	tt "github.com/plusev-terminal/go-plugin-common/trading"
+	"github.com/plusev-terminal/go-plugin-common/wasmutils"
 )
 
 // Client represents a client for the WooX v3 API
@@ -379,17 +380,21 @@ func countPrecisionFromTickString(tick string) int {
 	if tick == "" || tick == "0" {
 		return 0
 	}
+
 	idx := strings.Index(tick, ".")
 	if idx == -1 {
 		return 0
 	}
+
 	dec := strings.TrimRight(tick[idx+1:], "0")
 	if dec == "" {
 		return 0
 	}
+
 	if len(dec) > 12 {
 		return 12
 	}
+
 	return len(dec)
 }
 
@@ -429,7 +434,7 @@ func (c *Client) GetTimeframes() []tt.Timeframe {
 }
 
 // GetOHLCV fetches historical OHLCV data from WooX
-func (c *Client) GetOHLCV(params exchange.GetOHLCVParams) ([]tt.OHLCVRecord, error) {
+func (c *Client) GetOHLCV(params ex.GetOHLCVParams) ([]tt.OHLCVRecord, error) {
 	// WooX has maximum time range limits per kline type (in milliseconds):
 	// 1m: 604800000ms (7 days)
 	// 5m: 2592000000ms (30 days)
@@ -594,6 +599,7 @@ func (c *Client) PrepareStream(request plugin.StreamSetupRequest) (plugin.Stream
 	if streamContext == nil {
 		return plugin.StreamSetupResponse{Success: false, Error: "streamContext is required"}, nil
 	}
+
 	ctxSymbol, _ := streamContext["symbol"].(string)
 	ctxTimeframe, _ := streamContext["timeframe"].(string)
 	if strings.TrimSpace(ctxSymbol) == "" || strings.TrimSpace(ctxTimeframe) == "" {
@@ -604,6 +610,7 @@ func (c *Client) PrepareStream(request plugin.StreamSetupRequest) (plugin.Stream
 	// Strict contract: symbol/timeframe come from streamContext.
 	symbol := strings.TrimSpace(ctxSymbol)
 	timeframe := strings.TrimSpace(ctxTimeframe)
+
 	usePrivate, _ := request.Parameters["private"].(bool)
 
 	supportedTf := c.GetTimeframes()
@@ -830,8 +837,10 @@ func (c *Client) generateWooXSignature(timestamp string, method, path, body stri
 
 func (c *Client) generateWooXV1Signature(timestamp, params string) string {
 	message := params + "|" + timestamp
+
 	h := hmac.New(sha256.New, []byte(c.apiSecret))
 	h.Write([]byte(message))
+
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -841,7 +850,11 @@ func (c *Client) addAuthHeaders(req *rt.Request, body string) {
 		return // No authentication configured
 	}
 
-	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	now, err := wasmutils.Now()
+	if err != nil || now.IsZero() {
+		now = time.Now()
+	}
+	timestamp := strconv.FormatInt(now.UnixMilli(), 10)
 
 	// Extract path from URL for signature
 	path := req.URL
@@ -866,7 +879,13 @@ func (c *Client) addAuthHeadersV1(req *rt.Request, params string) {
 		return
 	}
 
-	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	now, err := wasmutils.Now()
+	if err != nil || now.IsZero() {
+		now = time.Now()
+	}
+
+	timestamp := strconv.FormatInt(now.UnixMilli(), 10)
+
 	signature := c.generateWooXV1Signature(timestamp, params)
 
 	if req.Headers == nil {
@@ -1022,15 +1041,19 @@ func (c *Client) GetOrders(symbol string, status string, limit int) ([]Order, er
 	}
 
 	q := url.Values{}
+
 	if symbol != "" {
 		q.Set("symbol", symbol)
 	}
+
 	if status != "" {
 		q.Set("status", status)
 	}
+
 	if limit > 0 {
 		q.Set("size", strconv.Itoa(limit))
 	}
+
 	sortedParams := q.Encode()
 
 	url := c.baseURL + "/v1/orders"
@@ -1049,6 +1072,7 @@ func (c *Client) GetOrders(symbol string, status string, limit int) ([]Order, er
 	c.addAuthHeadersV1(req, sortedParams)
 
 	var response OrderResponse
+
 	_, err := c.requester.Send(req, &response)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch orders: %w", err)
@@ -1087,6 +1111,583 @@ func (c *Client) GetPositions() ([]PositionRow, error) {
 	}
 
 	return response.Data.Rows, nil
+}
+
+// ---------------------------------------------------------------------------
+// Trade History  — GET /v1/client/hist_trades  (v1 auth, all-time)
+// ---------------------------------------------------------------------------
+
+// WooXTrade represents a single trade (fill) returned by the WooX trade history API.
+type WooXTrade struct {
+	ID                int64   `json:"id"`
+	Symbol            string  `json:"symbol"`
+	OrderID           int64   `json:"order_id"`
+	OrderTag          string  `json:"order_tag"`
+	ExecutedPrice     float64 `json:"executed_price"`
+	ExecutedQuantity  float64 `json:"executed_quantity"`
+	IsMaker           int     `json:"is_maker"`
+	Side              string  `json:"side"` // BUY or SELL
+	Fee               float64 `json:"fee"`
+	FeeAsset          string  `json:"fee_asset"`
+	ExecutedTimestamp string  `json:"executed_timestamp"` // Unix epoch in seconds as string e.g. "1566264290.250"
+}
+
+// WooXArchivedTradesResponse is the JSON shape returned by /v1/client/hist_trades.
+type WooXArchivedTradesResponse struct {
+	Success bool        `json:"success"`
+	Data    []WooXTrade `json:"data"`
+}
+
+// GetTradeHistory fetches archived trade history from WooX.
+// It uses the /v1/client/hist_trades endpoint which contains all-time data
+// and supports cursor-based pagination via fromId.
+func (c *Client) GetTradeHistory(params ex.GetTradeHistoryParams) (*tt.PaginatedTradeResponse, error) {
+	if !c.isAuthenticated() {
+		return nil, fmt.Errorf("authentication required for trade history")
+	}
+
+	q := url.Values{}
+
+	// Symbol filter — convert from normalized "BTC/USDT" or WooX "SPOT_BTC_USDT".
+	symbol := ""
+	if params.Market.Symbol != "" {
+		symbol = params.Market.Symbol
+		// If it doesn't already have the WooX prefix, add SPOT_ prefix.
+		if !strings.Contains(symbol, "_") {
+			symbol = "SPOT_" + strings.ReplaceAll(symbol, "/", "_")
+		}
+		q.Set("symbol", symbol)
+	}
+
+	// start_t and end_t are mandatory for hist_trades.
+	// Provide defaults when the caller omits them.
+	startTime := params.StartTime
+	endTime := params.EndTime
+
+	if startTime == nil {
+		// Default to WooX launch era (2019-01-01 UTC) to cover all-time history.
+		t := time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC)
+		startTime = &t
+	}
+	if endTime == nil {
+		now, err := wasmutils.Now()
+		if err != nil || now.IsZero() {
+			now = time.Now()
+		}
+		endTime = &now
+	}
+
+	q.Set("start_t", strconv.FormatInt(startTime.UnixMilli(), 10))
+	q.Set("end_t", strconv.FormatInt(endTime.UnixMilli(), 10))
+
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+
+	q.Set("limit", strconv.Itoa(limit))
+
+	// Cursor is the fromId (last trade ID from previous page).
+	if params.Cursor != "" {
+		q.Set("fromId", params.Cursor)
+	}
+
+	sortedParams := q.Encode()
+
+	reqURL := c.baseURL + "/v1/client/hist_trades"
+	if sortedParams != "" {
+		reqURL += "?" + sortedParams
+	}
+
+	req := &rt.Request{
+		Method: "GET",
+		URL:    reqURL,
+		Headers: map[string]string{
+			"Content-Type": "application/json",
+		},
+	}
+
+	var response WooXArchivedTradesResponse
+	if _, err := c.sendWithRetry(req, func() { c.addAuthHeadersV1(req, sortedParams) }, &response); err != nil {
+		return nil, fmt.Errorf("failed to fetch trade history: %w", err)
+	}
+
+	if !response.Success {
+		return nil, fmt.Errorf("WooX API returned success=false for trade history")
+	}
+
+	records := make([]tt.TradeRecord, 0, len(response.Data))
+	var lastID int64
+	for _, t := range response.Data {
+		base, quote := parseWooXSymbol(t.Symbol)
+
+		// executed_timestamp is epoch seconds as string like "1566264290.250"
+		tsMs := parseWooXTimestamp(t.ExecutedTimestamp)
+
+		orderType := "taker"
+		if t.IsMaker == 1 {
+			orderType = "maker"
+		}
+
+		assetType := "spot"
+		isPerp := strings.HasPrefix(t.Symbol, "PERP_")
+		if isPerp {
+			assetType = "perpetual"
+		}
+
+		symbol := base + "/" + quote
+		if isPerp {
+			symbol = base + "-PERP"
+		}
+
+		records = append(records, tt.TradeRecord{
+			TxID:         strconv.FormatInt(t.ID, 10),
+			OrderID:      strconv.FormatInt(t.OrderID, 10),
+			Timestamp:    tsMs,
+			Symbol:       symbol,
+			SymbolKey:    t.Symbol,
+			Base:         base,
+			Quote:        quote,
+			Side:         strings.ToLower(t.Side),
+			Price:        strconv.FormatFloat(t.ExecutedPrice, 'f', -1, 64),
+			Amount:       strconv.FormatFloat(t.ExecutedQuantity, 'f', -1, 64),
+			Fee:          strconv.FormatFloat(t.Fee, 'f', -1, 64),
+			FeeCurrency:  t.FeeAsset,
+			OrderType:    orderType,
+			AssetType:    assetType,
+			IsDerivative: isPerp,
+		})
+
+		if t.ID > lastID {
+			lastID = t.ID
+		}
+	}
+
+	hasMore := len(response.Data) >= limit
+
+	nextCursor := ""
+	if hasMore && lastID > 0 {
+		nextCursor = strconv.FormatInt(lastID, 10)
+	}
+
+	return &tt.PaginatedTradeResponse{
+		Records:    records,
+		NextCursor: nextCursor,
+		HasMore:    hasMore,
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Transfer (Deposit/Withdraw) History  — GET /v1/asset/history  (v1 auth)
+// ---------------------------------------------------------------------------
+
+// WooXAssetHistoryRow represents a single deposit/withdrawal row from WooX.
+type WooXAssetHistoryRow struct {
+	ID            string   `json:"id"`
+	ExternalID    string   `json:"external_id"`
+	Token         string   `json:"token"`
+	TargetAddress string   `json:"target_address"`
+	SourceAddress string   `json:"source_address"`
+	Extra         string   `json:"extra"`
+	Type          string   `json:"type"`       // BALANCE or COLLATERAL
+	TokenSide     string   `json:"token_side"` // DEPOSIT or WITHDRAW
+	Amount        float64  `json:"amount"`
+	TxID          string   `json:"tx_id"`
+	FeeToken      *string  `json:"fee_token"`
+	FeeAmount     *float64 `json:"fee_amount"`
+	Status        string   `json:"status"` // NEW, CONFIRMING, PROCESSING, COMPLETED, CANCELED
+	CreatedTime   string   `json:"created_time"`
+	UpdatedTime   string   `json:"updated_time"`
+}
+
+// WooXAssetHistoryMeta contains pagination metadata.
+type WooXAssetHistoryMeta struct {
+	Total          int `json:"total"`
+	RecordsPerPage int `json:"records_per_page"`
+	CurrentPage    int `json:"current_page"`
+}
+
+// WooXAssetHistoryResponse is the JSON shape returned by /v1/asset/history.
+type WooXAssetHistoryResponse struct {
+	Success bool                  `json:"success"`
+	Meta    WooXAssetHistoryMeta  `json:"meta"`
+	Rows    []WooXAssetHistoryRow `json:"rows"`
+}
+
+// GetTransferHistory fetches deposit/withdrawal history from WooX.
+func (c *Client) GetTransferHistory(params ex.GetTransferHistoryParams) (*tt.PaginatedTransferResponse, error) {
+	if !c.isAuthenticated() {
+		return nil, fmt.Errorf("authentication required for transfer history")
+	}
+
+	q := url.Values{}
+
+	if params.Asset != "" {
+		q.Set("token", strings.ToUpper(params.Asset))
+	}
+
+	// Map "deposit"/"withdrawal" to WooX's "DEPOSIT"/"WITHDRAW"
+	if params.Action != "" {
+		switch strings.ToLower(params.Action) {
+		case "deposit":
+			q.Set("token_side", "DEPOSIT")
+		case "withdrawal", "withdraw":
+			q.Set("token_side", "WITHDRAW")
+		}
+	}
+
+	if params.StartTime != nil {
+		q.Set("start_t", strconv.FormatInt(params.StartTime.UnixMilli(), 10))
+	}
+	if params.EndTime != nil {
+		q.Set("end_t", strconv.FormatInt(params.EndTime.UnixMilli(), 10))
+	}
+
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 25
+	}
+
+	q.Set("size", strconv.Itoa(limit))
+
+	// Cursor is page number for this endpoint.
+	page := 1
+	if params.Cursor != "" {
+		if p, err := strconv.Atoi(params.Cursor); err == nil && p > 0 {
+			page = p
+		}
+	}
+
+	q.Set("page", strconv.Itoa(page))
+
+	sortedParams := q.Encode()
+
+	reqURL := c.baseURL + "/v1/asset/history"
+	if sortedParams != "" {
+		reqURL += "?" + sortedParams
+	}
+
+	req := &rt.Request{
+		Method: "GET",
+		URL:    reqURL,
+		Headers: map[string]string{
+			"Content-Type": "application/json",
+		},
+	}
+
+	var response WooXAssetHistoryResponse
+	if _, err := c.sendWithRetry(req, func() { c.addAuthHeadersV1(req, sortedParams) }, &response); err != nil {
+		return nil, fmt.Errorf("failed to fetch transfer history: %w", err)
+	}
+
+	if !response.Success {
+		return nil, fmt.Errorf("WooX API returned success=false for transfer history")
+	}
+
+	records := make([]tt.TransferRecord, 0, len(response.Rows))
+	for _, row := range response.Rows {
+		action := "deposit"
+		if strings.EqualFold(row.TokenSide, "WITHDRAW") {
+			action = "withdrawal"
+		}
+
+		tsMs := parseWooXTimestamp(row.CreatedTime)
+
+		rec := tt.TransferRecord{
+			TxID:        row.TxID,
+			Timestamp:   tsMs,
+			Asset:       strings.ToUpper(row.Token),
+			Amount:      strconv.FormatFloat(row.Amount, 'f', -1, 64),
+			Action:      action,
+			Source:      row.SourceAddress,
+			Destination: row.TargetAddress,
+			Status:      strings.ToLower(row.Status),
+		}
+
+		// Use the exchange's own ID as dedup fallback if no on-chain tx_id
+		if rec.TxID == "" {
+			rec.TxID = row.ID
+		}
+
+		if row.FeeAmount != nil {
+			rec.Fee = strconv.FormatFloat(*row.FeeAmount, 'f', -1, 64)
+		}
+		if row.FeeToken != nil {
+			rec.FeeCurrency = *row.FeeToken
+		}
+
+		records = append(records, rec)
+	}
+
+	// Page-based pagination: hasMore when total > page * size
+	totalPages := 1
+	if response.Meta.RecordsPerPage > 0 && response.Meta.Total > 0 {
+		totalPages = (response.Meta.Total + response.Meta.RecordsPerPage - 1) / response.Meta.RecordsPerPage
+	}
+
+	hasMore := page < totalPages
+
+	nextCursor := ""
+	if hasMore {
+		nextCursor = strconv.Itoa(page + 1)
+	}
+
+	return &tt.PaginatedTransferResponse{
+		Records:    records,
+		NextCursor: nextCursor,
+		HasMore:    hasMore,
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Order History  — GET /v1/orders  (v1 auth, status=COMPLETED)
+// ---------------------------------------------------------------------------
+
+// GetOrderHistory fetches completed order history from WooX and returns as trades.
+func (c *Client) GetOrderHistory(params ex.GetOrderHistoryParams) (*tt.PaginatedTradeResponse, error) {
+	if !c.isAuthenticated() {
+		return nil, fmt.Errorf("authentication required for order history")
+	}
+
+	q := url.Values{}
+	q.Set("status", "COMPLETED")
+
+	symbol := ""
+	if params.Market.Symbol != "" {
+		symbol = params.Market.Symbol
+		if !strings.Contains(symbol, "_") {
+			symbol = "SPOT_" + strings.ReplaceAll(symbol, "/", "_")
+		}
+		q.Set("symbol", symbol)
+	}
+
+	if params.StartTime != nil {
+		q.Set("start_t", strconv.FormatInt(params.StartTime.UnixMilli(), 10))
+	}
+
+	if params.EndTime != nil {
+		q.Set("end_t", strconv.FormatInt(params.EndTime.UnixMilli(), 10))
+	}
+
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+
+	q.Set("size", strconv.Itoa(limit))
+
+	// Cursor is page number for this endpoint.
+	page := 1
+	if params.Cursor != "" {
+		if p, err := strconv.Atoi(params.Cursor); err == nil && p > 0 {
+			page = p
+		}
+	}
+
+	q.Set("page", strconv.Itoa(page))
+
+	sortedParams := q.Encode()
+
+	reqURL := c.baseURL + "/v1/orders"
+	if sortedParams != "" {
+		reqURL += "?" + sortedParams
+	}
+
+	req := &rt.Request{
+		Method: "GET",
+		URL:    reqURL,
+		Headers: map[string]string{
+			"Content-Type": "application/json",
+		},
+	}
+
+	c.addAuthHeadersV1(req, sortedParams)
+
+	// Re-use the same v1 orders response shape
+	var response struct {
+		Success bool `json:"success"`
+		Meta    struct {
+			Total          int `json:"total"`
+			RecordsPerPage int `json:"records_per_page"`
+			CurrentPage    int `json:"current_page"`
+		} `json:"meta"`
+		Rows []struct {
+			OrderID               int64    `json:"order_id"`
+			Symbol                string   `json:"symbol"`
+			Side                  string   `json:"side"`
+			OrderType             string   `json:"type"`
+			Price                 float64  `json:"price"`
+			Quantity              float64  `json:"quantity"`
+			TotalExecutedQuantity float64  `json:"executed"`
+			AverageExecutedPrice  *float64 `json:"average_executed_price"`
+			TotalFee              float64  `json:"total_fee"`
+			FeeAsset              string   `json:"fee_asset"`
+			Status                string   `json:"status"`
+			CreatedTime           string   `json:"created_time"`
+			UpdatedTime           string   `json:"updated_time"`
+		} `json:"rows"`
+	}
+
+	_, err := c.requester.Send(req, &response)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch order history: %w", err)
+	}
+
+	if !response.Success {
+		return nil, fmt.Errorf("WooX API returned success=false for order history")
+	}
+
+	records := make([]tt.TradeRecord, 0, len(response.Rows))
+	for _, o := range response.Rows {
+		if o.TotalExecutedQuantity == 0 {
+			continue // Skip orders with no fills
+		}
+
+		base, quote := parseWooXSymbol(o.Symbol)
+
+		price := o.Price
+		if o.AverageExecutedPrice != nil {
+			price = *o.AverageExecutedPrice
+		}
+
+		tsMs := parseWooXTimestamp(o.CreatedTime)
+
+		assetType := "spot"
+		isPerp := strings.HasPrefix(o.Symbol, "PERP_")
+		if isPerp {
+			assetType = "perpetual"
+		}
+
+		symbol := base + "/" + quote
+		if isPerp {
+			symbol = base + "-PERP"
+		}
+
+		records = append(records, tt.TradeRecord{
+			TxID:         strconv.FormatInt(o.OrderID, 10),
+			OrderID:      strconv.FormatInt(o.OrderID, 10),
+			Timestamp:    tsMs,
+			Symbol:       symbol,
+			SymbolKey:    o.Symbol,
+			Base:         base,
+			Quote:        quote,
+			Side:         strings.ToLower(o.Side),
+			Price:        strconv.FormatFloat(price, 'f', -1, 64),
+			Amount:       strconv.FormatFloat(o.TotalExecutedQuantity, 'f', -1, 64),
+			Fee:          strconv.FormatFloat(o.TotalFee, 'f', -1, 64),
+			FeeCurrency:  o.FeeAsset,
+			AssetType:    assetType,
+			IsDerivative: isPerp,
+		})
+	}
+
+	totalPages := 1
+	if response.Meta.RecordsPerPage > 0 && response.Meta.Total > 0 {
+		totalPages = (response.Meta.Total + response.Meta.RecordsPerPage - 1) / response.Meta.RecordsPerPage
+	}
+
+	hasMore := page < totalPages
+
+	nextCursor := ""
+	if hasMore {
+		nextCursor = strconv.Itoa(page + 1)
+	}
+
+	return &tt.PaginatedTradeResponse{
+		Records:    records,
+		NextCursor: nextCursor,
+		HasMore:    hasMore,
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// WooX symbol / timestamp helpers
+// ---------------------------------------------------------------------------
+
+// parseWooXSymbol extracts base and quote from WooX symbol format.
+// "SPOT_BTC_USDT" → ("BTC", "USDT"), "PERP_ETH_USDT" → ("ETH", "USDT")
+func parseWooXSymbol(symbol string) (base, quote string) {
+	parts := strings.Split(symbol, "_")
+	if len(parts) >= 3 {
+		return parts[1], parts[2]
+	}
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return symbol, ""
+}
+
+// parseWooXTimestamp converts WooX's "epoch seconds as string" (e.g. "1566264290.250")
+// to Unix milliseconds. Returns 0 on parse failure.
+func parseWooXTimestamp(ts string) int64 {
+	ts = strings.TrimSpace(ts)
+	if ts == "" {
+		return 0
+	}
+
+	f, err := strconv.ParseFloat(ts, 64)
+	if err != nil {
+		return 0
+	}
+
+	return int64(f * 1000)
+}
+
+// sendWithRetry sends a request with automatic retry on rate-limit responses.
+// refreshAuth is called before each attempt to regenerate auth headers — necessary
+// because WooX V1 signatures embed a millisecond timestamp.
+// Retries up to 3 times with fixed backoff: 1.5 s → 3 s → 6 s.
+// WooX does not return a Retry-After header, so fixed backoff is the correct approach.
+func (c *Client) sendWithRetry(req *rt.Request, refreshAuth func(), v any) (*rt.Response, error) {
+	backoff := []time.Duration{
+		1500 * time.Millisecond,
+		3 * time.Second,
+		6 * time.Second,
+	}
+
+	for attempt := 0; attempt <= len(backoff); attempt++ {
+		refreshAuth()
+
+		resp, err := c.requester.Send(req, v)
+		if err != nil {
+			return nil, err
+		}
+
+		// Not rate-limited — done.
+		if resp.Status != 429 && !isWooXRateLimitBody(resp.Body) {
+			return resp, nil
+		}
+
+		if attempt == len(backoff) {
+			return nil, fmt.Errorf("WooX rate limit exceeded after %d attempts", attempt+1)
+		}
+
+		wait := backoff[attempt]
+
+		c.log.WarnWithData("WooX rate limit hit, retrying", map[string]any{
+			"attempt": attempt + 1,
+			"waitMs":  wait.Milliseconds(),
+		})
+
+		time.Sleep(wait)
+	}
+
+	return nil, fmt.Errorf("WooX rate limit exceeded") // unreachable
+}
+
+// isWooXRateLimitBody returns true when the response body contains WooX's
+// rate-limit error code (-1003), which can appear inside a 429 or a 200.
+func isWooXRateLimitBody(body []byte) bool {
+	var probe struct {
+		Success bool `json:"success"`
+		Code    int  `json:"code"`
+	}
+
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return false
+	}
+
+	return !probe.Success && probe.Code == -1003
 }
 
 // CancelOrder cancels an existing order (requires authentication)

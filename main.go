@@ -15,6 +15,7 @@ import (
 	commonstream "github.com/plusev-terminal/go-plugin-common/stream"
 
 	"github.com/trading-peter/plusev_datasource_woox_plugin/woox"
+	"github.com/trading-peter/plusev_datasource_woox_plugin/wooxlimits"
 )
 
 // ============================================================================
@@ -70,9 +71,24 @@ func (p *WooXPlugin) GetMeta() m.Meta {
 		},
 		Resources: m.ResourceAccess{
 			AllowedNetworkTargets: []m.NetworkTargetRule{
-				{Pattern: "https://api.woox.io/*"},
+				// WOO X's published per-endpoint rate limits — the rule table
+				// and its doc sources live in the wooxlimits package (pure
+				// meta, natively testable). Public endpoints are limited per
+				// IP, private endpoints per account (application ID); these
+				// are the standard app-less tiers, overridable in the Rate
+				// Limits UI.
+				{
+					Pattern: "https://api.woox.io/*",
+					Limits:  wooxlimits.APIWooX(),
+				},
+				{
+					Pattern: "https://api-pub.woox.io/*",
+					Limits:  wooxlimits.APIPubWooX(),
+				},
+				// Staging (testnet) mirrors the production endpoints, but the
+				// REST base URL is hardcoded to https://api.woox.io, so no REST
+				// traffic ever reaches staging — nothing declared there.
 				{Pattern: "https://api.staging.woox.io/*"},
-				{Pattern: "https://api-pub.woox.io/*"},
 				{Pattern: "wss://wss.woox.io/*"},
 				{Pattern: "wss://wss.staging.woox.io/*"},
 			},
@@ -82,41 +98,12 @@ func (p *WooXPlugin) GetMeta() m.Meta {
 	}
 }
 
+// GetRateLimits returns an empty slice: WOO X's real per-endpoint budgets are
+// declared as manifest limits on the network targets in GetMeta, and opting
+// out of the legacy per-command limiter here keeps requests from being
+// throttled by both layers.
 func (p *WooXPlugin) GetRateLimits() []plugin.RateLimit {
-	// Define rate limits based on WooX API documentation
-	// Public endpoints: rate limit is based on IP address
-	// Private endpoints: rate limit is based on account (application ID)
-
-	return []plugin.RateLimit{
-		// Public endpoints - IP-based rate limits (10 requests per 1 second per IP)
-		{
-			Command: ex.CMD_GET_MARKETS, // GET /v1/public/info
-			Scope:   []plugin.RateLimitScope{plugin.RateLimitScopeIP},
-			RPS:     10.0,
-			Burst:   10,
-		},
-		{
-			Command: ex.CMD_GET_TIMEFRAMES, // No API call, returns static data
-			Scope:   []plugin.RateLimitScope{plugin.RateLimitScopeIP},
-			RPS:     10.0,
-			Burst:   10,
-		},
-		{
-			Command: ex.CMD_GET_OHLCV, // GET /v1/public/kline or /v1/hist/kline
-			Scope:   []plugin.RateLimitScope{plugin.RateLimitScopeIP},
-			RPS:     1.0,
-			Burst:   1.0,
-		},
-
-		// WebSocket streams - Connection limits per IP (1000 concurrent)
-		// Per account: 80 concurrent connections max
-		{
-			Command: ex.CMD_OHLCV_STREAM,
-			Scope:   []plugin.RateLimitScope{plugin.RateLimitScopeAPIKey}, // Per account limit
-			RPS:     1.0,                                                  // Allow setup, actual limit is concurrent connections
-			Burst:   80,                                                   // Max 80 concurrent connections per account
-		},
-	}
+	return []plugin.RateLimit{}
 }
 
 // GetConfigFields returns the configuration fields needed by this plugin
@@ -167,6 +154,9 @@ func (p *WooXPlugin) RegisterCommands(router *plugin.CommandRouter) {
 	router.Register(ex.CMD_GET_BALANCES, p.handleGetBalances)
 	router.Register(ex.CMD_GET_POSITIONS, p.handleGetPositions)
 	router.Register(ex.CMD_GET_ORDERS, p.handleGetOrders)
+	router.Register(ex.CMD_GET_TRADE_HISTORY, p.handleGetTradeHistory)
+	router.Register(ex.CMD_GET_ORDER_HISTORY, p.handleGetOrderHistory)
+	router.Register(ex.CMD_GET_TRANSFER_HISTORY, p.handleGetTransferHistory)
 }
 
 // ============================================================================
@@ -513,6 +503,51 @@ func (p *WooXPlugin) handleGetOrders(params map[string]any) plugin.Response {
 	}
 
 	return plugin.SuccessResponse(resp, time.Second*3)
+}
+
+// handleGetTradeHistory returns paginated trade fill history.
+func (p *WooXPlugin) handleGetTradeHistory(params map[string]any) plugin.Response {
+	if p.client == nil {
+		return plugin.ErrorResponseMsg("client not initialized")
+	}
+	parsed := ex.GetTradeHistoryParamsFromMap(params)
+
+	result, err := p.client.GetTradeHistory(parsed)
+	if err != nil {
+		return plugin.ErrorResponse(err)
+	}
+
+	return plugin.SuccessResponse(result)
+}
+
+// handleGetOrderHistory returns paginated completed order history.
+func (p *WooXPlugin) handleGetOrderHistory(params map[string]any) plugin.Response {
+	if p.client == nil {
+		return plugin.ErrorResponseMsg("client not initialized")
+	}
+	parsed := ex.GetOrderHistoryParamsFromMap(params)
+
+	result, err := p.client.GetOrderHistory(parsed)
+	if err != nil {
+		return plugin.ErrorResponse(err)
+	}
+
+	return plugin.SuccessResponse(result)
+}
+
+// handleGetTransferHistory returns paginated deposit/withdrawal history.
+func (p *WooXPlugin) handleGetTransferHistory(params map[string]any) plugin.Response {
+	if p.client == nil {
+		return plugin.ErrorResponseMsg("client not initialized")
+	}
+	parsed := ex.GetTransferHistoryParamsFromMap(params)
+
+	result, err := p.client.GetTransferHistory(parsed)
+	if err != nil {
+		return plugin.ErrorResponse(err)
+	}
+
+	return plugin.SuccessResponse(result)
 }
 
 // handleOHLCVStream sets up a WebSocket stream for OHLCV data
