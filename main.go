@@ -106,6 +106,16 @@ func (p *WooXPlugin) GetRateLimits() []plugin.RateLimit {
 	return []plugin.RateLimit{}
 }
 
+// GetOrderCapabilities deliberately declares nothing: this plugin registers
+// no createOrders command (its order surface is read-only — getOrders plus
+// trade/order/transfer history), so the honest capability set is empty. The
+// host reads this declaration and rejects any order attempt against WooX
+// with a clear error instead of dispatching it to a plugin that cannot place
+// orders.
+func (p *WooXPlugin) GetOrderCapabilities() ex.OrderCapabilities {
+	return ex.OrderCapabilities{}
+}
+
 // GetConfigFields returns the configuration fields needed by this plugin
 func (p *WooXPlugin) GetConfigFields() []plugin.ConfigField {
 	// Initialize client if needed to get config fields
@@ -457,20 +467,24 @@ func (p *WooXPlugin) handleGetOrders(params map[string]any) plugin.Response {
 		}
 
 		order := acct.Order{
-			OrderID:           fmt.Sprintf("%d", o.OrderID),
-			ClientOrderID:     o.ClientID,
-			Symbol:            o.Symbol,
-			Side:              normalizeWooXSide(o.Side),
-			Type:              orderType,
-			Status:            status,
-			Price:             o.Price,
+			OrderID:       fmt.Sprintf("%d", o.OrderID),
+			ClientOrderID: o.ClientID,
+			Symbol:        o.Symbol,
+			Side:          normalizeWooXSide(o.Side),
+			Type:          orderType,
+			Status:        status,
+
+			// Venues fill unused price fields with zero placeholders; absent
+			// prices are the empty string in the normalized shape.
+			Price:             acct.OptionalPrice(o.Price),
 			Quantity:          o.Quantity,
 			ExecutedQuantity:  o.TotalExecutedQuantity,
 			RemainingQuantity: remaining,
 			TimeInForce:       tif,
 			ReduceOnly:        o.ReduceOnly,
 			PostOnly:          postOnly,
-			TriggerPrice:      o.TriggerPrice,
+			TriggerPrice:      acct.OptionalPrice(o.TriggerPrice),
+
 			Components: map[string]string{
 				"amount":         o.Amount,
 				"total_fee":      o.TotalFee,

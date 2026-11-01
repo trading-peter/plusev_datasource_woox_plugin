@@ -1254,7 +1254,7 @@ func (c *Client) GetTradeHistory(params ex.GetTradeHistoryParams) (*tt.Paginated
 			Fee:          strconv.FormatFloat(t.Fee, 'f', -1, 64),
 			FeeCurrency:  t.FeeAsset,
 			OrderType:    orderType,
-			AssetType:    string(assetType),
+			AssetType:    assetType,
 			IsDerivative: isPerp,
 		})
 
@@ -1576,7 +1576,7 @@ func (c *Client) GetOrderHistory(params ex.GetOrderHistoryParams) (*tt.Paginated
 			Amount:       strconv.FormatFloat(o.TotalExecutedQuantity, 'f', -1, 64),
 			Fee:          strconv.FormatFloat(o.TotalFee, 'f', -1, 64),
 			FeeCurrency:  o.FeeAsset,
-			AssetType:    string(assetType),
+			AssetType:    assetType,
 			IsDerivative: isPerp,
 		})
 	}
