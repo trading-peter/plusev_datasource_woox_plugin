@@ -40,7 +40,7 @@ func (p *DummyExchangePlugin) GetMeta() m.Meta {
 		Category:    "demo",
 		Description: "Dummy data source plugin template (returns fake markets + OHLCV)",
 		Author:      "your_name",
-		Version:     "v0.1.0",
+		Version: "v0.1.0",
 		Repository:  "https://example.com/your-repo",
 		Tags:        []string{"dummy", "template", "datasource"},
 		Resources: m.ResourceAccess{
